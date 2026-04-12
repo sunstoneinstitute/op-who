@@ -10,6 +10,7 @@ let package = Package(
             path: "Sources",
             linkerSettings: [
                 .linkedFramework("ApplicationServices"),
+                .linkedFramework("Security"),
             ]
         )
     ]

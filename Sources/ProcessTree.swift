@@ -1,14 +1,24 @@
 import AppKit
 import Darwin
+import Security
 
 struct ProcessNode {
     let pid: pid_t
     let ppid: pid_t
     let name: String
     let tty: String?
+    let executablePath: String?
+    let isVerifiedOnePasswordCLI: Bool
 
     var displayName: String {
         "\(name) (\(pid))"
+    }
+
+    var chainDisplayName: String {
+        if name == "op" && !isVerifiedOnePasswordCLI {
+            return "unverified op"
+        }
+        return name
     }
 }
 
@@ -27,6 +37,8 @@ struct ChainResult {
 
 enum ProcessTree {
 
+    private static let onePasswordTeamID = "2BUA8C4S2C"
+
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
         "com.googlecode.iterm2",
@@ -39,7 +51,9 @@ enum ProcessTree {
 
     /// Find all running processes named "op".
     static func findOpProcesses() -> [ProcessNode] {
-        return allProcesses().filter { $0.name == "op" }
+        return allProcesses()
+            .filter { $0.name == "op" }
+            .map(verifiedOpNode)
     }
 
     /// Walk the parent chain from a PID, stopping at Mac app processes or launchd.
@@ -58,8 +72,12 @@ enum ProcessTree {
         var terminalPID: pid_t? = nil
         var claudePID: pid_t? = nil
 
-        while current > 0, let proc = lookup[current], !visited.contains(current) {
+        while current > 0, var proc = lookup[current], !visited.contains(current) {
             visited.insert(current)
+
+            if proc.name == "op" {
+                proc = verifiedOpNode(proc)
+            }
 
             // Stop at launchd
             if proc.name == "launchd" { break }
@@ -112,7 +130,7 @@ enum ProcessTree {
 
     /// Format a process chain as a compact display string.
     static func formatChain(_ chain: [ProcessNode]) -> String {
-        chain.map { $0.name }.joined(separator: " \u{2192} ")
+        chain.map { $0.chainDisplayName }.joined(separator: " \u{2192} ")
     }
 
     /// Try to detect a Claude Code session name from a claude/node process.
@@ -187,16 +205,70 @@ enum ProcessTree {
 
     /// Check if a `node` process is actually Claude Code by looking at its args.
     private static func isClaudeCodeProcess(pid: pid_t) -> Bool {
+        let raw = processArguments(pid: pid)
+        return raw.contains("claude") || raw.contains("@anthropic")
+    }
+
+    private static func verifiedOpNode(_ node: ProcessNode) -> ProcessNode {
+        guard node.name == "op" else { return node }
+
+        let path = executablePath(pid: node.pid)
+        return ProcessNode(
+            pid: node.pid,
+            ppid: node.ppid,
+            name: node.name,
+            tty: node.tty,
+            executablePath: path,
+            isVerifiedOnePasswordCLI: path.map(isSignedByOnePassword) ?? false
+        )
+    }
+
+    private static func executablePath(pid: pid_t) -> String? {
+        let raw = processArguments(pid: pid)
+        let bytes = Array(raw.utf8)
+        let start = MemoryLayout<Int32>.size
+        guard bytes.count > start else { return nil }
+
+        let pathBytes = bytes[start...].prefix { $0 != 0 }
+        guard !pathBytes.isEmpty else { return nil }
+        return String(bytes: pathBytes, encoding: .utf8)
+    }
+
+    private static func processArguments(pid: pid_t) -> String {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         var size: Int = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return false }
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return "" }
 
         var buffer = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return false }
+        guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return "" }
 
         // KERN_PROCARGS2 format: argc (int32), then exec path, then NUL-padded args
-        let raw = String(decoding: buffer.prefix(min(size, 4096)), as: UTF8.self)
-        return raw.contains("claude") || raw.contains("@anthropic")
+        return String(decoding: buffer.prefix(min(size, 4096)), as: UTF8.self)
+    }
+
+    private static func isSignedByOnePassword(path: String) -> Bool {
+        let url = URL(fileURLWithPath: path).resolvingSymlinksInPath() as CFURL
+        var staticCode: SecStaticCode?
+
+        guard SecStaticCodeCreateWithPath(url, SecCSFlags(), &staticCode) == errSecSuccess,
+              let staticCode = staticCode else {
+            return false
+        }
+
+        let requirementText = """
+            anchor apple generic and certificate leaf[subject.OU] = "\(onePasswordTeamID)"
+            """ as CFString
+        var requirement: SecRequirement?
+        guard SecRequirementCreateWithString(
+            requirementText,
+            SecCSFlags(),
+            &requirement
+        ) == errSecSuccess,
+              let requirement = requirement else {
+            return false
+        }
+
+        return SecStaticCodeCheckValidity(staticCode, SecCSFlags(), requirement) == errSecSuccess
     }
 
     static func allProcesses() -> [ProcessNode] {
@@ -236,6 +308,13 @@ enum ProcessTree {
             }
         }
 
-        return ProcessNode(pid: pid, ppid: ppid, name: name, tty: tty)
+        return ProcessNode(
+            pid: pid,
+            ppid: ppid,
+            name: name,
+            tty: tty,
+            executablePath: nil,
+            isVerifiedOnePasswordCLI: false
+        )
     }
 }

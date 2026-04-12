@@ -101,8 +101,7 @@ class OverlayPanel {
         stack.spacing = 4
 
         // Process chain
-        let chainStr = ProcessTree.formatChain(entry.chain)
-        let chainLabel = makeLabel(chainStr, size: 13, weight: .regular, mono: true)
+        let chainLabel = makeChainLabel(entry.chain)
         stack.addArrangedSubview(chainLabel)
 
         // Claude session info
@@ -172,6 +171,36 @@ class OverlayPanel {
             : NSFont.systemFont(ofSize: size, weight: weight)
         label.textColor = color
         label.isSelectable = true
+        return label
+    }
+
+    private func makeChainLabel(_ chain: [ProcessNode]) -> NSTextField {
+        let label = makeLabel("", size: 13, weight: .regular, mono: true)
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        let attributed = NSMutableAttributedString()
+
+        for (index, node) in chain.enumerated() {
+            if index > 0 {
+                attributed.append(NSAttributedString(
+                    string: " \u{2192} ",
+                    attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]
+                ))
+            }
+
+            let color: NSColor
+            if node.name == "op" {
+                color = node.isVerifiedOnePasswordCLI ? .systemGreen : .systemOrange
+            } else {
+                color = .labelColor
+            }
+
+            attributed.append(NSAttributedString(
+                string: node.chainDisplayName,
+                attributes: [.font: font, .foregroundColor: color]
+            ))
+        }
+
+        label.attributedStringValue = attributed
         return label
     }
 
