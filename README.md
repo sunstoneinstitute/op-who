@@ -75,11 +75,9 @@ op-who validates the identity of processes it interacts with:
 swift test
 ```
 
-## Releasing
+## Contributing
 
-Signed, notarized release builds are created automatically when a version tag is pushed. The GitHub Actions workflow builds the `.app` bundle, signs and notarizes it, creates a GitHub Release, and updates the Homebrew cask.
-
-See [docs/cert-sign-guide.md](docs/cert-sign-guide.md) for certificate setup.
+See [CONTRIBUTORS.md](CONTRIBUTORS.md) for architecture details, build instructions, and the release process.
 
 ## License
 
