@@ -11,7 +11,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PLIST="Sources/Info.plist"
+PLIST="Sources/OpWhoLib/Info.plist"
 CHANGELOG="CHANGELOG.md"
 
 # --- Parse arguments ---

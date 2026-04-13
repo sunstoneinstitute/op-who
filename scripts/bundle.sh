@@ -25,6 +25,6 @@ rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
 
 cp "$BUILD_DIR/$PRODUCT" "$APP_DIR/Contents/MacOS/"
-cp Sources/Info.plist "$APP_DIR/Contents/"
+cp Sources/OpWhoLib/Info.plist "$APP_DIR/Contents/"
 
 echo "Bundle assembled: $APP_DIR"

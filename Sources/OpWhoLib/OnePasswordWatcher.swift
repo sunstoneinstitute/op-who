@@ -3,7 +3,7 @@ import ApplicationServices
 
 /// Watches for 1Password approval dialogs via the Accessibility API
 /// and shows a process-tree overlay when one appears.
-class OnePasswordWatcher {
+public class OnePasswordWatcher {
     private var observer: AXObserver?
     private var appElement: AXUIElement?
     private var overlayPanel: OverlayPanel?
@@ -17,7 +17,7 @@ class OnePasswordWatcher {
         "com.agilebits.onepassword7",
     ]
 
-    init() {
+    public init() {
         let nc = NSWorkspace.shared.notificationCenter
 
         let launchObs = nc.addObserver(

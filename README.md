@@ -15,25 +15,25 @@ When 1Password shows its approval dialog, op-who pops up a floating overlay show
 
 1Password's approval dialog tells you *which app* is requesting access, but not *which terminal session* or *which command* started it. If you have multiple terminals open running builds, git operations, or Claude Code sessions, you're left guessing. op-who fills in the missing context so you can approve (or deny) with confidence.
 
-## Requirements
+## Install
 
-- macOS 13+
-- Swift 5.9+
-- 1Password 8 with CLI or SSH agent integration enabled
+```bash
+brew tap sunstoneinstitute/tap
+brew install --cask sunstoneinstitute/tap/op-who
+```
 
-## Building
+Or build from source:
 
 ```bash
 swift build
+scripts/bundle.sh
+open .build/op-who.app
 ```
 
-## Running
+## Requirements
 
-```bash
-.build/debug/op-who
-```
-
-On first launch, you'll be prompted to grant Accessibility permission in System Settings → Privacy & Security → Accessibility.
+- macOS 13+
+- 1Password 8 with CLI or SSH agent integration enabled
 
 ## How it works
 
@@ -69,15 +69,17 @@ op-who validates the identity of processes it interacts with:
 - **Accessibility** — required to detect 1Password dialogs and read window attributes
 - **Automation** — prompted on first use of "Show Tab" (sends AppleScript to terminal apps)
 
-## Releasing
-
-Signed, notarized release builds:
+## Testing
 
 ```bash
-scripts/release.sh
+swift test
 ```
 
-Requires a Developer ID Application certificate and notarytool credentials. See [docs/cert-sign-guide.md](docs/cert-sign-guide.md) for setup instructions.
+## Releasing
+
+Signed, notarized release builds are created automatically when a version tag is pushed. The GitHub Actions workflow builds the `.app` bundle, signs and notarizes it, creates a GitHub Release, and updates the Homebrew cask.
+
+See [docs/cert-sign-guide.md](docs/cert-sign-guide.md) for certificate setup.
 
 ## License
 

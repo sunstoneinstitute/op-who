@@ -27,7 +27,7 @@ jobs:
           rm -rf "$APP_DIR"
           mkdir -p "$APP_DIR/Contents/MacOS"
           cp .build/release/op-who "$APP_DIR/Contents/MacOS/"
-          cp Sources/Info.plist "$APP_DIR/Contents/"
+          cp Sources/OpWhoLib/Info.plist "$APP_DIR/Contents/"
 
           # Stamp version from tag into Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ steps.version.outputs.version }}" "$APP_DIR/Contents/Info.plist"

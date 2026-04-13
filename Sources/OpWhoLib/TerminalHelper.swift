@@ -1,12 +1,12 @@
 import AppKit
 import ApplicationServices
 
-enum TerminalHelper {
+public enum TerminalHelper {
 
     // MARK: - Tab Title Lookup
 
     /// Get the tab/session title for a TTY in a specific terminal app.
-    static func tabTitle(forTTY tty: String, terminalBundleID: String?, terminalPID: pid_t?) -> String? {
+    public static func tabTitle(forTTY tty: String, terminalBundleID: String?, terminalPID: pid_t?) -> String? {
         guard isValidTTYPath(tty) else {
             NSLog("[op-who] Invalid TTY path: \(tty)")
             return nil
@@ -58,7 +58,7 @@ enum TerminalHelper {
     // MARK: - Tab Activation
 
     /// Try to activate the terminal tab that owns a given TTY.
-    static func activateTab(forTTY tty: String, terminalBundleID: String? = nil) {
+    public static func activateTab(forTTY tty: String, terminalBundleID: String? = nil) {
         guard isValidTTYPath(tty) else {
             NSLog("[op-who] Invalid TTY path: \(tty)")
             return
@@ -69,9 +69,11 @@ enum TerminalHelper {
             return
         }
 
+        var ok = false
+
         switch bid {
         case "com.googlecode.iterm2":
-            runAppleScript("""
+            ok = runAppleScript("""
                 tell application "iTerm2"
                     repeat with w in windows
                         repeat with t in tabs of w
@@ -88,7 +90,7 @@ enum TerminalHelper {
                 """)
 
         case "com.apple.Terminal":
-            runAppleScript("""
+            ok = runAppleScript("""
                 tell application "Terminal"
                     repeat with w in windows
                         repeat with t in tabs of w
@@ -104,7 +106,11 @@ enum TerminalHelper {
                 """)
 
         default:
-            // For other terminals, try to activate the app at least
+            break
+        }
+
+        // Fall back to activating the app if AppleScript failed or wasn't attempted
+        if !ok {
             if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bid).first {
                 app.activate()
             }
@@ -112,7 +118,7 @@ enum TerminalHelper {
     }
 
     /// Write a message to a TTY device.
-    static func writeMessage(to tty: String, message: String) {
+    public static func writeMessage(to tty: String, message: String) {
         guard isValidTTYPath(tty) else {
             NSLog("[op-who] Invalid TTY path: \(tty)")
             return
@@ -131,7 +137,7 @@ enum TerminalHelper {
     // MARK: - Private
 
     /// Validate that a TTY path matches the expected macOS format `/dev/ttys[0-9]+`.
-    private static func isValidTTYPath(_ tty: String) -> Bool {
+    public static func isValidTTYPath(_ tty: String) -> Bool {
         let pattern = #"^/dev/ttys\d+$"#
         return tty.range(of: pattern, options: .regularExpression) != nil
     }
@@ -193,12 +199,16 @@ enum TerminalHelper {
         return firstTitle
     }
 
-    private static func runAppleScript(_ source: String) {
-        guard let script = NSAppleScript(source: source) else { return }
+    /// Run an AppleScript and return whether it succeeded.
+    @discardableResult
+    private static func runAppleScript(_ source: String) -> Bool {
+        guard let script = NSAppleScript(source: source) else { return false }
         var error: NSDictionary?
         script.executeAndReturnError(&error)
         if let error = error {
             NSLog("[op-who] AppleScript error: \(error)")
+            return false
         }
+        return true
     }
 }

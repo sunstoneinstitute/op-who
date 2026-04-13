@@ -1,4 +1,5 @@
 import AppKit
+import OpWhoLib
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!

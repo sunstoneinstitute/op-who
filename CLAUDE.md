@@ -4,7 +4,24 @@ macOS menu bar utility that identifies which process triggered a 1Password appro
 
 ## Architecture
 
-Swift Package Manager executable, no Xcode project. Non-sandboxed (needs Accessibility API access).
+Swift Package Manager project with a library target (`OpWhoLib`) and thin executable (`op-who`). Non-sandboxed (needs Accessibility API access). Distributed as a signed/notarized `.app` bundle.
+
+### Source layout
+
+```
+Sources/
+  OpWhoLib/           — library target (all logic)
+    ProcessTree.swift
+    OnePasswordWatcher.swift
+    OverlayPanel.swift
+    TerminalHelper.swift
+    Info.plist        — .app bundle metadata (excluded from SPM compilation)
+  op-who/
+    main.swift        — NSApplication setup, status bar item, accessibility check
+Tests/
+  ProcessTreeTests.swift
+  TerminalHelperTests.swift
+```
 
 ### Source files
 
@@ -23,10 +40,36 @@ Swift Package Manager executable, no Xcode project. Non-sandboxed (needs Accessi
 - Dialog dismissal detected by polling (500ms): checks AX element validity + whether trigger process PIDs still exist
 - CWD walks the process chain to find the first non-`/` directory (trigger processes often have CWD `/`)
 - Claude Code detected by checking `node` process args for "claude" or "@anthropic" strings
+- `LSUIElement=true` in Info.plist makes this a menu bar app (no dock icon)
 
 ## Build & run
 
 ```bash
 swift build
-.build/debug/op-who
+scripts/bundle.sh              # assemble .app bundle (debug)
+open .build/op-who.app
+```
+
+## Testing
+
+```bash
+swift test
+```
+
+Tests use Swift Testing (`import Testing`). Covers pure logic: ProcessNode display names, chain formatting, path tidying, TTY validation, process enumeration.
+
+## Releasing
+
+```bash
+scripts/release.sh             # build, sign, notarize, package .app
+scripts/release-version.sh     # bump version, changelog, tag
+```
+
+Or use the `/release` slash command which automates version bumping, changelog generation, and tagging.
+
+## Install
+
+```bash
+brew tap sunstoneinstitute/tap
+brew install --cask sunstoneinstitute/tap/op-who
 ```

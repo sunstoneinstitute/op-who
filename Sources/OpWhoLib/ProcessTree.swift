@@ -2,19 +2,28 @@ import AppKit
 import Darwin
 import Security
 
-struct ProcessNode {
-    let pid: pid_t
-    let ppid: pid_t
-    let name: String
-    let tty: String?
-    let executablePath: String?
-    let isVerifiedOnePasswordCLI: Bool
+public struct ProcessNode {
+    public let pid: pid_t
+    public let ppid: pid_t
+    public let name: String
+    public let tty: String?
+    public let executablePath: String?
+    public let isVerifiedOnePasswordCLI: Bool
 
-    var displayName: String {
+    public init(pid: pid_t, ppid: pid_t, name: String, tty: String?, executablePath: String?, isVerifiedOnePasswordCLI: Bool) {
+        self.pid = pid
+        self.ppid = ppid
+        self.name = name
+        self.tty = tty
+        self.executablePath = executablePath
+        self.isVerifiedOnePasswordCLI = isVerifiedOnePasswordCLI
+    }
+
+    public var displayName: String {
         "\(name) (\(pid))"
     }
 
-    var chainDisplayName: String {
+    public var chainDisplayName: String {
         if name == "op" && !isVerifiedOnePasswordCLI {
             return "unverified op"
         }
@@ -22,20 +31,16 @@ struct ProcessNode {
     }
 }
 
-struct ChainResult {
-    let chain: [ProcessNode]
-    let tty: String?
-    /// Bundle ID of the terminal app at the top of the chain, if any.
-    let terminalBundleID: String?
-    /// PID of the terminal app.
-    let terminalPID: pid_t?
-    /// True if a Claude Code process (claude or node running claude) was found in the chain.
-    let hasClaudeCode: Bool
-    /// PID of the Claude Code process, if found.
-    let claudePID: pid_t?
+public struct ChainResult {
+    public let chain: [ProcessNode]
+    public let tty: String?
+    public let terminalBundleID: String?
+    public let terminalPID: pid_t?
+    public let hasClaudeCode: Bool
+    public let claudePID: pid_t?
 }
 
-enum ProcessTree {
+public enum ProcessTree {
 
     private static let onePasswordTeamID = "2BUA8C4S2C"
 
@@ -50,14 +55,14 @@ enum ProcessTree {
     ]
 
     /// Find all running processes named "op".
-    static func findOpProcesses() -> [ProcessNode] {
+    public static func findOpProcesses() -> [ProcessNode] {
         return allProcesses()
             .filter { $0.name == "op" }
             .map(verifiedOpNode)
     }
 
     /// Find running processes that are likely SSH agent clients.
-    static func findSSHAgentClients() -> [ProcessNode] {
+    public static func findSSHAgentClients() -> [ProcessNode] {
         let sshCommands: Set<String> = ["ssh", "git", "scp", "sftp", "rsync"]
         return allProcesses().filter { sshCommands.contains($0.name) }
     }
@@ -65,13 +70,13 @@ enum ProcessTree {
     /// Find all trigger processes (op + SSH clients) in a single process scan.
     /// Does NOT perform signature verification — that is deferred to chain
     /// building so it doesn't block initial detection.
-    static func findTriggerProcesses() -> [ProcessNode] {
+    public static func findTriggerProcesses() -> [ProcessNode] {
         let triggerNames: Set<String> = ["op", "ssh", "git", "scp", "sftp", "rsync"]
         return allProcesses().filter { triggerNames.contains($0.name) }
     }
 
     /// Walk the parent chain from a PID, stopping at Mac app processes or launchd.
-    static func buildChain(from pid: pid_t) -> ChainResult {
+    public static func buildChain(from pid: pid_t) -> ChainResult {
         let all = allProcesses()
         let lookup = Dictionary(all.map { ($0.pid, $0) }, uniquingKeysWith: { a, _ in a })
 
@@ -143,13 +148,13 @@ enum ProcessTree {
     }
 
     /// Format a process chain as a compact display string.
-    static func formatChain(_ chain: [ProcessNode]) -> String {
+    public static func formatChain(_ chain: [ProcessNode]) -> String {
         chain.map { $0.chainDisplayName }.joined(separator: " \u{2192} ")
     }
 
     /// Try to detect a Claude Code session name from a claude/node process.
     /// Looks at open file descriptors for paths containing .claude/projects/.
-    static func claudeSessionInfo(pid: pid_t) -> String? {
+    public static func claudeSessionInfo(pid: pid_t) -> String? {
         // Use lsof to find open files — more reliable than raw proc APIs from Swift
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
@@ -208,7 +213,7 @@ enum ProcessTree {
     /// Uses proc_pidinfo for a direct kernel query (faster and more reliable
     /// than lsof, which can return stale or incorrect results in some
     /// terminal multiplexers).
-    static func processCWD(pid: pid_t) -> String? {
+    public static func processCWD(pid: pid_t) -> String? {
         var pathInfo = proc_vnodepathinfo()
         let size = MemoryLayout<proc_vnodepathinfo>.size
         let ret = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &pathInfo, Int32(size))
@@ -225,7 +230,7 @@ enum ProcessTree {
     /// Walk a process chain and return the most meaningful CWD.
     /// The trigger process (op, ssh) often runs with CWD "/", so we prefer
     /// the first ancestor that has a real working directory.
-    static func bestCWD(chain: [ProcessNode]) -> String? {
+    public static func bestCWD(chain: [ProcessNode]) -> String? {
         for node in chain {
             if let cwd = processCWD(pid: node.pid), cwd != "/" {
                 return cwd
@@ -239,7 +244,7 @@ enum ProcessTree {
     }
 
     /// Tidy a path for display: replace $HOME with ~.
-    static func tidyPath(_ path: String) -> String {
+    public static func tidyPath(_ path: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         if path == home {
             return "~"
@@ -307,7 +312,7 @@ enum ProcessTree {
     }
 
     /// Check if a running process (by PID) is signed by 1Password's Team ID.
-    static func isRunningProcessSignedByOnePassword(pid: pid_t) -> Bool {
+    public static func isRunningProcessSignedByOnePassword(pid: pid_t) -> Bool {
         let attributes = [kSecGuestAttributePid: pid] as CFDictionary
         var code: SecCode?
         guard SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(), &code) == errSecSuccess,
@@ -356,7 +361,7 @@ enum ProcessTree {
         return SecStaticCodeCheckValidity(staticCode, SecCSFlags(), requirement) == errSecSuccess
     }
 
-    static func allProcesses() -> [ProcessNode] {
+    public static func allProcesses() -> [ProcessNode] {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
         var size: Int = 0
 
