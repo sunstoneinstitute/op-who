@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build, sign, notarize, and package op-who for distribution.
+# Build, sign, notarize, and package op-who.app for distribution.
 #
 # Prerequisites:
 #   - A "Developer ID Application" certificate in your keychain
@@ -15,8 +15,8 @@ set -euo pipefail
 IDENTITY="${1:-}"
 ENTITLEMENTS="release.entitlements"
 PRODUCT="op-who"
-BUILD_DIR=".build/release"
-STAGE_DIR=".build/release-stage"
+APP_NAME="${PRODUCT}.app"
+APP_DIR=".build/${APP_NAME}"
 ZIP_PATH=".build/${PRODUCT}.zip"
 
 cd "$(dirname "$0")/.."
@@ -36,30 +36,25 @@ if [[ -z "$IDENTITY" ]]; then
     echo "Using identity: $IDENTITY"
 fi
 
-# --- Build --------------------------------------------------------------------
+# --- Build & assemble .app ---------------------------------------------------
 
-echo "Building release..."
-swift build -c release
+scripts/bundle.sh release
 
 # --- Sign with hardened runtime -----------------------------------------------
 
 echo "Signing with hardened runtime..."
-codesign --force --options runtime \
+codesign --deep --force --options runtime \
     --entitlements "$ENTITLEMENTS" \
     --sign "$IDENTITY" \
-    "$BUILD_DIR/$PRODUCT"
+    "$APP_DIR"
 
 echo "Verifying signature..."
-codesign --verify --verbose=2 "$BUILD_DIR/$PRODUCT"
+codesign --verify --deep --verbose=2 "$APP_DIR"
 
 # --- Package for notarization ------------------------------------------------
 
-rm -rf "$STAGE_DIR"
-mkdir -p "$STAGE_DIR"
-cp "$BUILD_DIR/$PRODUCT" "$STAGE_DIR/"
-
 rm -f "$ZIP_PATH"
-ditto -c -k --keepParent "$STAGE_DIR/$PRODUCT" "$ZIP_PATH"
+ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
 
 # --- Notarize -----------------------------------------------------------------
 
@@ -69,13 +64,14 @@ xcrun notarytool submit "$ZIP_PATH" \
     --wait
 
 echo "Stapling..."
-# Staple works on app bundles and disk images but not bare Mach-O executables.
-# For a standalone binary, notarization is verified online by Gatekeeper on
-# first launch. We skip staple here; distribute the signed zip.
-echo "(Stapling skipped — standalone executables rely on online notarization check)"
+xcrun stapler staple "$APP_DIR"
+
+# Re-zip with stapled ticket
+rm -f "$ZIP_PATH"
+ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
 
 # --- Done ---------------------------------------------------------------------
 
 echo ""
 echo "Release artifact: $ZIP_PATH"
-echo "Distribute this zip. Gatekeeper will verify notarization on first launch."
+echo "Install with: cp -R .build/${APP_NAME} /Applications/"
