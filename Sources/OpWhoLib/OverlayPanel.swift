@@ -66,7 +66,7 @@ class OverlayPanel {
             backing: .buffered,
             defer: false
         )
-        p.level = .floating
+        p.level = .popUpMenu
         p.isFloatingPanel = true
         p.hidesOnDeactivate = false
         p.titlebarAppearsTransparent = true
@@ -228,15 +228,6 @@ class OverlayPanel {
 
     @objc private func sendTTYMessage(_ sender: NSButton) {
         guard let tty = sender.cell?.representedObject as? String else { return }
-
-        let alert = NSAlert()
-        alert.messageText = "Send message to terminal?"
-        alert.informativeText = "This will write a notification line to \(tty). The message does not execute any commands."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Send")
-        alert.addButton(withTitle: "Cancel")
-
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
         TerminalHelper.writeMessage(to: tty, message: "\n[op-who] 1Password approval requested from this session\n")
     }
 }
