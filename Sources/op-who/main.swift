@@ -22,11 +22,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
-        menu.addItem(NSMenuItem(
+        let trustItem = NSMenuItem(
             title: trusted ? "Accessibility: Granted" : "Accessibility: Not Granted",
             action: nil,
             keyEquivalent: ""
-        ))
+        )
+        trustItem.offStateImage = Self.transparentStateImage()
+        menu.addItem(trustItem)
         menu.addItem(.separator())
         startupMenuItem = NSMenuItem(
             title: "Run on startup",
@@ -47,11 +49,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateStartupMenuItemState()
         menu.addItem(startupMenuItem)
         menu.addItem(.separator())
-        menu.addItem(NSMenuItem(
+        let quitItem = NSMenuItem(
             title: "Quit op-who",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
-        ))
+        )
+        // Once any item in the menu sets an offStateImage, macOS reserves a
+        // wider state column and falls back to a default "off" glyph for
+        // every other .off item — which means Quit sprouts a stray empty
+        // checkbox. Squash it with a transparent placeholder.
+        quitItem.offStateImage = Self.transparentStateImage()
+        menu.addItem(quitItem)
         statusItem.menu = menu
 
         watcher = OnePasswordWatcher()
@@ -112,6 +120,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateStartupMenuItemState() {
         startupMenuItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+    }
+
+    /// A fully-transparent image used as an off-state placeholder for menu
+    /// items that should NOT render a state glyph. Sized to roughly match
+    /// the checkbox SF Symbol so column alignment stays consistent.
+    private static func transparentStateImage() -> NSImage {
+        let size = NSSize(width: 14, height: 14)
+        let image = NSImage(size: size, flipped: false) { _ in true }
+        image.isTemplate = true
+        return image
     }
 
     /// Draw the menu-bar template icon: a filled disk with the inner ring
