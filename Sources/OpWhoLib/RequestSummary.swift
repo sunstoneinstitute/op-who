@@ -2,7 +2,7 @@ import Foundation
 
 /// Classifies a 1Password approval trigger into a category understandable
 /// without knowing the process model.
-public enum RequestKind: String, Equatable {
+public enum RequestKind: String, Codable, Equatable {
     /// Trusted `op` binary signed by 1Password.
     case onePasswordCLI
     /// `op` binary that failed signature verification — surface as a warning.
@@ -36,6 +36,10 @@ public struct RequestSummary: Equatable {
 /// `chain` is the trigger-first parent chain (chain[0] is the trigger).
 /// `triggerArgv` is the full argv of `chain[0]`, used to extract op subcommands,
 /// git subcommands, and similar diagnostic detail. Pass `[]` if unavailable.
+///
+/// `rules` selects which ordered ruleset to run. nil uses the live
+/// `OpWhoConfig.rules` (the user's stored configuration); tests pass an
+/// explicit list when they want a hermetic check.
 public func makeRequestSummary(
     chain: [ProcessNode],
     triggerArgv: [String] = [],
@@ -43,58 +47,85 @@ public func makeRequestSummary(
     claudeSession: String?,
     terminalBundleID: String?,
     cwd: String?,
-    pluginUpdate: ClaudePluginUpdate? = nil
+    triggerCwd: String? = nil,
+    pluginUpdate: ClaudePluginUpdate? = nil,
+    rules: [RequestRule]? = nil
 ) -> RequestSummary {
-    let trigger = chain.first
-    let kind = classifyKind(trigger: trigger)
+    let activeRules = rules ?? OpWhoConfig.rules
+    let context = MatchContext(
+        chain: chain,
+        triggerArgv: triggerArgv,
+        cwd: cwd,
+        triggerCwd: triggerCwd,
+        claudeSession: claudeSession,
+        pluginUpdate: pluginUpdate,
+        terminalBundleID: terminalBundleID
+    )
 
-    // Claude Code background fetches that update plugins/marketplaces are
-    // housekeeping — the user didn't ask for them. Render them with a single
-    // self-contained title that names the remote being fetched, so the
-    // 1Password approval has obvious provenance.
-    if let update = pluginUpdate {
+    // Engine produces both the matched rule (semantic kind, warning state)
+    // and the rendered text. nil only happens with an empty ruleset; the
+    // built-in defaults always end in a catch-all, so guard with a
+    // hardcoded fallback to keep callers tolerant of broken user configs.
+    let result = RequestRuleEngine.evaluate(rules: activeRules, context: context)
+
+    let kind: RequestKind
+    let action: String
+    let replacesActor: Bool
+    let ruleWarning: Bool
+    if let result = result {
+        kind = result.rule.kind
+        action = result.rendered
+        replacesActor = result.rule.replacesActor
+        ruleWarning = result.rule.isWarning
+    } else {
+        kind = .unknown
+        action = "triggered 1Password"
+        replacesActor = false
+        ruleWarning = true
+    }
+
+    let title: String
+    let subtitle: String?
+    if replacesActor {
+        // Full-title override (e.g. Claude plugin update housekeeping). The
+        // subtitle still carries terminal/cwd so provenance reads at a glance.
         var subtitleParts: [String] = []
         if let term = humanTerminalName(bundleID: terminalBundleID) {
             subtitleParts.append(term)
         }
         if let cwd = cwd { subtitleParts.append(cwd) }
-        return RequestSummary(
-            kind: kind,
-            title: "Claude plugin update check from \(update.remoteURL)",
-            subtitle: subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: " · "),
-            isWarning: false
+        title = action
+        subtitle = subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: " · ")
+    } else {
+        let actor = describeActor(
+            chain: chain,
+            tabTitle: tabTitle,
+            claudeSession: claudeSession,
+            terminalBundleID: terminalBundleID
         )
-    }
+        title = "\(actor) \(action)"
 
-    let actor = describeActor(
-        chain: chain,
-        tabTitle: tabTitle,
-        claudeSession: claudeSession,
-        terminalBundleID: terminalBundleID
-    )
-    let action = describeAction(kind: kind, trigger: trigger, argv: triggerArgv)
-    let title = "\(actor) \(action)"
-
-    var subtitleParts: [String] = []
-    if let claudeSession = claudeSession,
-       !actor.contains("’\(claudeSession)’") {
-        // Subtitle echoes the session only if the title didn't already name it.
-        subtitleParts.append("session: \(claudeSession)")
+        var subtitleParts: [String] = []
+        if let claudeSession = claudeSession,
+           !actor.contains("’\(claudeSession)’") {
+            // Subtitle echoes the session only if the title didn't already name it.
+            subtitleParts.append("session: \(claudeSession)")
+        }
+        if let term = humanTerminalName(bundleID: terminalBundleID),
+           !actor.contains(term) {
+            subtitleParts.append(term)
+        }
+        if let cwd = cwd {
+            subtitleParts.append(cwd)
+        }
+        subtitle = subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: " · ")
     }
-    if let term = humanTerminalName(bundleID: terminalBundleID),
-       !actor.contains(term) {
-        subtitleParts.append(term)
-    }
-    if let cwd = cwd {
-        subtitleParts.append(cwd)
-    }
-    let subtitle = subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: " · ")
 
     return RequestSummary(
         kind: kind,
         title: title,
         subtitle: subtitle,
-        isWarning: kind == .unverifiedOp || kind == .unknown
+        isWarning: ruleWarning
     )
 }
 
@@ -321,28 +352,12 @@ public func isRemoteGitSubcommand(argv: [String]) -> Bool {
     return networkGitSubcommands.contains(sub)
 }
 
-// MARK: - Private classification
-
-private func classifyKind(trigger: ProcessNode?) -> RequestKind {
-    guard let trigger = trigger else { return .unknown }
-    switch trigger.name {
-    case "op":
-        return trigger.isVerifiedOnePasswordCLI ? .onePasswordCLI : .unverifiedOp
-    case "ssh", "scp", "sftp", "rsync":
-        return .ssh
-    case "ssh-keygen", "op-ssh-sign":
-        // SSH commit signing: `git commit -S` invokes `ssh-keygen -Y sign`
-        // (or `op-ssh-sign` when 1Password is wired as gpg.ssh.program),
-        // which talks to the SSH agent to sign — same trust model as ssh.
-        return .ssh
-    case "git":
-        // The only reason `git` would trigger a 1Password approval is its SSH
-        // transport — HTTPS auth goes through git-credential helpers, not 1P.
-        return .ssh
-    default:
-        return .unknown
-    }
-}
+// MARK: - Actor / context labels
+//
+// Kind classification and the verb-phrase rendering used to live here; both
+// are now produced by `RequestRuleEngine` from a user-editable rule list
+// (see `RequestRule.swift`). Everything below is contextual labelling that
+// runs whether the matched rule replaces the actor or not.
 
 private let shellNames: Set<String> = ["bash", "zsh", "fish", "sh", "tcsh", "ksh", "dash"]
 
@@ -391,41 +406,28 @@ private func describeActor(
 
 /// Filter out tab titles that are just default shell prompts and add no clarity.
 /// (e.g. "bash", "zsh", "user@host", "user@host: /Users/x".)
+///
+/// Also filters cmux's `Item-N` AX-window-title placeholder. cmux exposes a
+/// window like "Item-0" to NSAccessibility while the actual user-visible
+/// workspace name lives in cmux's own scripting interface (queried via
+/// `CmuxHelper.surfaceInfo`). When that surface lookup misses we end up
+/// here with `tabTitle == "Item-0"` — which rendered as
+/// `'cmux workspace 'Item-0'` in the overlay until this filter caught it.
 private func looksGeneric(tabTitle: String) -> Bool {
     let trimmed = tabTitle.trimmingCharacters(in: .whitespaces)
     if trimmed.isEmpty { return true }
     if shellNames.contains(trimmed) { return true }
     if trimmed.contains("@") && trimmed.range(of: " ") == nil { return true }
     if trimmed.contains("@") && trimmed.contains(": ") { return true }
+    if isItemPlaceholder(trimmed) { return true }
     return false
 }
 
-private func describeAction(kind: RequestKind, trigger: ProcessNode?, argv: [String]) -> String {
-    switch kind {
-    case .onePasswordCLI:
-        if let phrase = describeOpInvocation(argv: argv) {
-            return "wants to \(phrase)"
-        }
-        return "is using the 1Password CLI"
-    case .unverifiedOp:
-        if let phrase = describeOpInvocation(argv: argv) {
-            return "is running an unverified ‘op’ binary (\(phrase))"
-        }
-        return "is running an unverified ‘op’ binary"
-    case .ssh:
-        let cmd = trigger?.name ?? "ssh"
-        if cmd == "git", let sub = describeGitInvocation(argv: argv) {
-            return "needs an SSH key for ‘git \(sub)’"
-        }
-        if cmd == "ssh" {
-            return "needs an SSH key"
-        }
-        if cmd == "op-ssh-sign" || cmd == "ssh-keygen" {
-            return "is signing with an SSH key"
-        }
-        return "needs an SSH key (via ‘\(cmd)’)"
-    case .unknown:
-        let cmd = trigger?.name ?? "?"
-        return "triggered 1Password (via ‘\(cmd)’)"
-    }
+/// True for cmux's `Item-<digits>` placeholder titles. Matches `Item-0`,
+/// `Item-42`, etc. Anything else falls through.
+private func isItemPlaceholder(_ s: String) -> Bool {
+    guard s.hasPrefix("Item-") else { return false }
+    let suffix = s.dropFirst("Item-".count)
+    return !suffix.isEmpty && suffix.allSatisfy { $0.isASCII && $0.isNumber }
 }
+

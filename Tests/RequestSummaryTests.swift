@@ -116,7 +116,12 @@ struct RequestSummaryTests {
 
     @Test func pluginUpdateTitleOverridesNormalSummary() {
         let chain = [node("git"), node("node"), node("claude")]
-        let update = ClaudePluginUpdate(remoteURL: "git@github.com:cloudflare/skills.git")
+        let update = ClaudePluginUpdate(
+            remoteURL: "git@github.com:cloudflare/skills.git",
+            repo: "cloudflare/skills",
+            sourceType: "github",
+            marketplaceName: "cloudflare"
+        )
         let s = makeRequestSummary(
             chain: chain, tabTitle: nil,
             claudeSession: "op-who",
@@ -125,7 +130,7 @@ struct RequestSummaryTests {
             pluginUpdate: update
         )
         #expect(s.kind == .ssh)
-        #expect(s.title == "Claude plugin update check from git@github.com:cloudflare/skills.git")
+        #expect(s.title == "Claude plugin update check for cloudflare/skills (github)")
         #expect(s.isWarning == false)
         #expect(s.subtitle?.contains("iTerm") == true)
         #expect(s.subtitle?.contains("~/.claude/plugins/marketplaces/cloudflare") == true)
@@ -179,6 +184,37 @@ struct RequestSummaryTests {
         )
         #expect(s.title.contains("Terminal tab") == false)
         #expect(s.title.contains("zsh shell"))
+    }
+
+    @Test func cmuxItemPlaceholderTabTitleIgnored() {
+        // cmux's AX layer reports "Item-0" / "Item-N" placeholder titles
+        // when its scripting-surface lookup hasn't (or can't) resolved the
+        // real workspace name. Without the Item-N filter this rendered as
+        // "Claude Code in cmux workspace ‘Item-0’" in the wild.
+        let chain = [node("ssh"), node("claude"), node("zsh")]
+        let s = makeRequestSummary(
+            chain: chain,
+            tabTitle: "Item-0",
+            claudeSession: "op-who",
+            terminalBundleID: "com.cmuxterm.app",
+            cwd: nil
+        )
+        #expect(!s.title.contains("Item-0"))
+        #expect(!s.title.contains("workspace"))
+        #expect(s.title.contains("Claude Code"))
+    }
+
+    @Test func itemPlaceholderRespectsExactPattern() {
+        // Real names that happen to start with "Item" but don't match
+        // the Item-<digits> shape should still pass through as actors.
+        let chain = [node("op", verified: true), node("zsh")]
+        let s = makeRequestSummary(
+            chain: chain,
+            tabTitle: "Item Bank",
+            claudeSession: nil,
+            terminalBundleID: nil, cwd: nil
+        )
+        #expect(s.title.contains("Item Bank"))
     }
 
     @Test func customTabTitleBecomesActor() {

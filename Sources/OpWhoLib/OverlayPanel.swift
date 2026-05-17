@@ -17,6 +17,9 @@ class OverlayPanel {
         let terminalBundleID: String?
         let terminalPID: pid_t?
         let cwd: String?
+        /// Trigger process's own (untidied) CWD. Stored for the ring buffer
+        /// so we can later replay rules whose `triggerCwdPrefix` matters.
+        let triggerCwd: String?
         let cmuxWorkspaceID: String?
         let cmuxTabID: String?
         let cmuxSurface: CmuxSurfaceInfo?
@@ -25,6 +28,14 @@ class OverlayPanel {
         /// Set when the trigger is a `git` operation Claude Code initiated
         /// in the background to refresh a plugin/marketplace repo.
         let pluginUpdate: ClaudePluginUpdate?
+        /// Pre-computed summary (title/subtitle/kind/isWarning) for this
+        /// entry. Computed once by the watcher so the overlay and log don't
+        /// re-evaluate the rule engine.
+        let summary: RequestSummary
+        /// Identity of the rule that produced `summary`. Used to render
+        /// the matched-rule name in the recent-requests ring buffer.
+        let matchedRuleID: UUID?
+        let matchedRuleName: String?
     }
 
     private var panel: NSPanel?
@@ -155,15 +166,7 @@ class OverlayPanel {
         stack.alignment = .leading
         stack.spacing = 4
 
-        let kind = makeRequestSummary(
-            chain: entry.chain,
-            triggerArgv: entry.triggerArgv,
-            tabTitle: entry.tabTitle,
-            claudeSession: entry.claudeSession,
-            terminalBundleID: entry.terminalBundleID,
-            cwd: entry.cwd,
-            pluginUpdate: entry.pluginUpdate
-        ).kind
+        let kind = entry.summary.kind
 
         // Three structured lead lines.
         let terminalRow = makeTerminalRow(entry)

@@ -42,7 +42,22 @@ public struct ChainResult {
 
 public enum ProcessTree {
 
-    private static let onePasswordTeamID = "2BUA8C4S2C"
+    /// Build a `SecRequirement` text that matches any binary signed by
+    /// one of the team IDs the user has marked trusted. Returns nil when
+    /// the list is empty — verifying anything would be meaningless, so
+    /// callers treat nil as "no binary is verified".
+    private static func trustedPublisherRequirementText() -> String? {
+        let teamIDs = OpWhoConfig.trustedTeamIDs.filter { !$0.isEmpty }
+        guard !teamIDs.isEmpty else { return nil }
+        // OR-chain the per-team-ID requirements so a binary signed by ANY
+        // configured publisher checks out. `anchor apple generic` ensures
+        // we trust only Apple-issued Developer ID certs, not arbitrary
+        // self-signed material.
+        let clauses = teamIDs.map {
+            "(anchor apple generic and certificate leaf[subject.OU] = \"\($0)\")"
+        }
+        return clauses.joined(separator: " or ")
+    }
 
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
@@ -298,7 +313,7 @@ public enum ProcessTree {
             name: node.name,
             tty: node.tty,
             executablePath: path,
-            isVerifiedOnePasswordCLI: path.map(isSignedByOnePassword) ?? false
+            isVerifiedOnePasswordCLI: path.map(isSignedByTrustedPublisher) ?? false
         )
     }
 
@@ -321,8 +336,11 @@ public enum ProcessTree {
         var buffer = [UInt8](repeating: 0, count: size)
         guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return "" }
 
-        // KERN_PROCARGS2 format: argc (int32), then exec path, then NUL-padded args
-        return String(decoding: buffer.prefix(min(size, 4096)), as: UTF8.self)
+        // KERN_PROCARGS2 format: argc (int32), then exec path, then NUL-padded args.
+        // Cap at ARG_MAX (the OS-wide argv+env ceiling) so the conversion never
+        // runs away on a pathological process; sysctl can't return more than
+        // that anyway, so in practice this just uses the full buffer.
+        return String(decoding: buffer.prefix(min(size, Int(ARG_MAX))), as: UTF8.self)
     }
 
     /// Return the full argv of a running process, or [] if unavailable.
@@ -434,53 +452,52 @@ public enum ProcessTree {
         return argv
     }
 
-    /// Check if a running process (by PID) is signed by 1Password's Team ID.
-    public static func isRunningProcessSignedByOnePassword(pid: pid_t) -> Bool {
+    /// Check if a running process (by PID) is signed by any of the team
+    /// IDs the user has marked trusted in `OpWhoConfig.trustedTeamIDs`.
+    /// Used to gate AX-observer attach to the 1Password app — if the
+    /// trusted list ever ends up empty the attach refuses, which is the
+    /// safe failure mode (worse to attach to a counterfeit 1Password
+    /// than to be inert).
+    public static func isRunningProcessSignedByTrustedPublisher(pid: pid_t) -> Bool {
+        guard let reqText = trustedPublisherRequirementText() else { return false }
         let attributes = [kSecGuestAttributePid: pid] as CFDictionary
         var code: SecCode?
         guard SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(), &code) == errSecSuccess,
               let code = code else {
             return false
         }
-
-        let requirementText = """
-            anchor apple generic and certificate leaf[subject.OU] = "\(onePasswordTeamID)"
-            """ as CFString
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(
-            requirementText,
+            reqText as CFString,
             SecCSFlags(),
             &requirement
         ) == errSecSuccess,
               let requirement = requirement else {
             return false
         }
-
         return SecCodeCheckValidity(code, SecCSFlags(), requirement) == errSecSuccess
     }
 
-    private static func isSignedByOnePassword(path: String) -> Bool {
+    /// Static-code check against the trusted-publisher list — used when
+    /// classifying trigger binaries (today only `op`, but the matcher's
+    /// `binaryVerified` predicate generalizes the concept).
+    private static func isSignedByTrustedPublisher(path: String) -> Bool {
+        guard let reqText = trustedPublisherRequirementText() else { return false }
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath() as CFURL
         var staticCode: SecStaticCode?
-
         guard SecStaticCodeCreateWithPath(url, SecCSFlags(), &staticCode) == errSecSuccess,
               let staticCode = staticCode else {
             return false
         }
-
-        let requirementText = """
-            anchor apple generic and certificate leaf[subject.OU] = "\(onePasswordTeamID)"
-            """ as CFString
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(
-            requirementText,
+            reqText as CFString,
             SecCSFlags(),
             &requirement
         ) == errSecSuccess,
               let requirement = requirement else {
             return false
         }
-
         return SecStaticCodeCheckValidity(staticCode, SecCSFlags(), requirement) == errSecSuccess
     }
 
