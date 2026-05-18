@@ -42,48 +42,15 @@ public struct ChainResult {
 
 public enum ProcessTree {
 
-    /// 1Password's Apple Team ID. Hardcoded — distinct from the
-    /// user-editable trusted-publisher list, which only governs how
-    /// trigger binaries (e.g. `op` clones) are classified. The AX-observer
-    /// attach to the 1Password app process always uses this constant so a
-    /// user-added publisher can never grant a non-1Password app permission
-    /// to act as 1Password.
+    /// 1Password's Apple Team ID. Pinned in code — never user-configurable
+    /// — so a malicious app cannot expand the set of signing identities
+    /// op-who treats as 1Password. Used both to gate the AX-observer
+    /// attach to the 1Password app process and to verify trigger binaries
+    /// claiming to be the `op` CLI.
     private static let onePasswordTeamID = "2BUA8C4S2C"
 
-    /// Validate that a team ID looks like an Apple Developer Team ID:
-    /// 10 ASCII alphanumeric characters. Filters out empties, whitespace,
-    /// or anything containing characters that would break the
-    /// `SecRequirement` string we build below.
-    private static func isValidTeamID(_ s: String) -> Bool {
-        guard s.count == 10 else { return false }
-        return s.unicodeScalars.allSatisfy { scalar in
-            (scalar >= "0" && scalar <= "9")
-                || (scalar >= "A" && scalar <= "Z")
-                || (scalar >= "a" && scalar <= "z")
-        }
-    }
-
-    /// Build a `SecRequirement` text that matches any binary signed by
-    /// one of the team IDs the user has marked trusted. Returns nil when
-    /// the list is empty — verifying anything would be meaningless, so
-    /// callers treat nil as "no binary is verified".
-    private static func trustedPublisherRequirementText() -> String? {
-        let teamIDs = OpWhoConfig.trustedTeamIDs.filter(isValidTeamID)
-        guard !teamIDs.isEmpty else { return nil }
-        // OR-chain the per-team-ID requirements so a binary signed by ANY
-        // configured publisher checks out. `anchor apple generic` ensures
-        // we trust only Apple-issued Developer ID certs, not arbitrary
-        // self-signed material.
-        let clauses = teamIDs.map {
-            "(anchor apple generic and certificate leaf[subject.OU] = \"\($0)\")"
-        }
-        return clauses.joined(separator: " or ")
-    }
-
-    /// `SecRequirement` text that matches only binaries signed by
-    /// 1Password's own Team ID. Used by `OnePasswordWatcher` to gate the
-    /// AX-observer attach; deliberately ignores `OpWhoConfig.trustedTeamIDs`
-    /// so user-added publishers cannot pass this guard.
+    /// `SecRequirement` text matching binaries signed by 1Password's
+    /// Team ID under an Apple-issued Developer ID cert chain.
     private static let onePasswordRequirementText: String =
         "anchor apple generic and certificate leaf[subject.OU] = \"\(onePasswordTeamID)\""
 
@@ -341,7 +308,7 @@ public enum ProcessTree {
             name: node.name,
             tty: node.tty,
             executablePath: path,
-            isVerifiedOnePasswordCLI: path.map(isSignedByTrustedPublisher) ?? false
+            isVerifiedOnePasswordCLI: path.map(isSignedByOnePassword) ?? false
         )
     }
 
@@ -480,26 +447,11 @@ public enum ProcessTree {
         return argv
     }
 
-    /// Check if a running process (by PID) is signed by 1Password's own
-    /// Apple Team ID. Used to gate AX-observer attach to the 1Password
-    /// app — pinned to 1Password specifically so a user-added trusted
-    /// publisher (intended only for trigger-binary classification)
-    /// cannot grant a non-1Password app the right to act as 1Password.
+    /// Check if a running process (by PID) is signed by 1Password's
+    /// Apple Team ID. Used both to gate AX-observer attach to the
+    /// 1Password app process and (via the static-code variant below)
+    /// to classify `op` trigger binaries.
     public static func isRunningProcessSignedByOnePassword(pid: pid_t) -> Bool {
-        return isRunningProcess(pid: pid, requirementText: onePasswordRequirementText)
-    }
-
-    /// Check if a running process (by PID) is signed by any of the team
-    /// IDs the user has marked trusted in `OpWhoConfig.trustedTeamIDs`.
-    /// Reserved for the matcher's `binaryVerified` predicate on trigger
-    /// binaries; do **not** use this to authenticate the 1Password app
-    /// itself (use `isRunningProcessSignedByOnePassword` for that).
-    public static func isRunningProcessSignedByTrustedPublisher(pid: pid_t) -> Bool {
-        guard let reqText = trustedPublisherRequirementText() else { return false }
-        return isRunningProcess(pid: pid, requirementText: reqText)
-    }
-
-    private static func isRunningProcess(pid: pid_t, requirementText: String) -> Bool {
         let attributes = [kSecGuestAttributePid: pid] as CFDictionary
         var code: SecCode?
         guard SecCodeCopyGuestWithAttributes(nil, attributes, SecCSFlags(), &code) == errSecSuccess,
@@ -508,7 +460,7 @@ public enum ProcessTree {
         }
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(
-            requirementText as CFString,
+            onePasswordRequirementText as CFString,
             SecCSFlags(),
             &requirement
         ) == errSecSuccess,
@@ -518,11 +470,10 @@ public enum ProcessTree {
         return SecCodeCheckValidity(code, SecCSFlags(), requirement) == errSecSuccess
     }
 
-    /// Static-code check against the trusted-publisher list — used when
-    /// classifying trigger binaries (today only `op`, but the matcher's
-    /// `binaryVerified` predicate generalizes the concept).
-    private static func isSignedByTrustedPublisher(path: String) -> Bool {
-        guard let reqText = trustedPublisherRequirementText() else { return false }
+    /// Static-code check against 1Password's Team ID — used when
+    /// classifying `op` trigger binaries for the matcher's
+    /// `binaryVerified` predicate.
+    private static func isSignedByOnePassword(path: String) -> Bool {
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath() as CFURL
         var staticCode: SecStaticCode?
         guard SecStaticCodeCreateWithPath(url, SecCSFlags(), &staticCode) == errSecSuccess,
@@ -531,7 +482,7 @@ public enum ProcessTree {
         }
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(
-            reqText as CFString,
+            onePasswordRequirementText as CFString,
             SecCSFlags(),
             &requirement
         ) == errSecSuccess,

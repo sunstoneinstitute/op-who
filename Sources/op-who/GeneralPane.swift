@@ -1,10 +1,10 @@
 import AppKit
 import ServiceManagement
 
-/// General settings tab inside the Settings window. Currently holds just the
-/// "Run on startup" toggle that used to live in the status-bar menu — kept
-/// in its own pane so future global toggles can sit alongside it without
-/// reshaping the surrounding tabs.
+/// Options section inside the Settings window. Currently holds just the
+/// "Run on startup" toggle that used to live in the status-bar menu —
+/// kept in its own type so future global toggles can sit alongside it
+/// without reshaping the surrounding layout.
 final class GeneralPane: NSObject {
 
     private let startupCheckbox = NSButton(
@@ -34,7 +34,7 @@ final class GeneralPane: NSObject {
     private func makeContentView() -> NSView {
         let container = NSView()
 
-        let header = NSTextField(labelWithString: "General")
+        let header = NSTextField(labelWithString: "Options")
         header.font = NSFont.boldSystemFont(ofSize: 13)
 
         let subhead = NSTextField(labelWithString:

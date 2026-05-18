@@ -1,56 +1,34 @@
 import AppKit
 import OpWhoLib
 
-/// Tabbed configuration window. Hosts two panes side-by-side via
-/// NSTabView's `.topTabsBezelBorder` style — a horizontal tab selector
-/// at the top of the window with the active pane drawn in a bezeled box
-/// below.
-///
-/// Adding a third pane later (e.g. logging, advanced) is a one-liner:
-/// append another `NSTabViewItem` and the pane class that owns its
-/// content.
+/// Single-pane Settings window. Replaces the tabbed layout with a vertical
+/// stack of sections (Options, Rules) hosted inside an NSScrollView so the
+/// content can grow without resizing the window. The "Run on startup"
+/// toggle from the old General tab lives inline in the Options section;
+/// the Rules section embeds `RulesPane`'s unified user-+-built-in table.
 final class ConfigWindowController: NSWindowController {
 
     private let generalPane: GeneralPane
     private let rulesPane: RulesPane
-    private let builtInRulesPane: BuiltInRulesPane
-    private let publishersPane: PublishersPane
-    private let tabView = NSTabView()
 
     init(
         ruleStore: RequestRuleStore,
-        recentStore: RecentRequestsStore,
-        publisherStore: TrustedPublisherStore
+        recentStore: RecentRequestsStore
     ) {
         self.generalPane = GeneralPane()
         self.rulesPane = RulesPane(store: ruleStore, recentStore: recentStore)
-        self.builtInRulesPane = BuiltInRulesPane(store: ruleStore)
-        self.publishersPane = PublishersPane(store: publisherStore)
 
         let window = ConfigWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: 880, height: 720),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.title = "op-who Settings"
-        window.minSize = NSSize(width: 700, height: 540)
+        window.minSize = NSSize(width: 720, height: 540)
         super.init(window: window)
 
-        // Hand the panes the window they should present sheets on.
-        // Done after super.init so `self.window` is non-nil.
         rulesPane.presenter = window
-        builtInRulesPane.presenter = window
-        publishersPane.presenter = window
-
-        // "Copy as User Rule" in the Built-ins tab appends a clone to user
-        // rules. Tell the User Rules pane to reload + select it (so its
-        // detail form populates from the clone's matcher), then switch
-        // tabs so the user lands on the new row ready to edit.
-        builtInRulesPane.onCopyToUserRules = { [weak self] newRuleID in
-            self?.rulesPane.reloadAndSelect(ruleID: newRuleID)
-            self?.tabView.selectTabViewItem(withIdentifier: "user-rules")
-        }
 
         window.contentView = makeContentView()
         window.center()
@@ -59,9 +37,6 @@ final class ConfigWindowController: NSWindowController {
     required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
 
     override func showWindow(_ sender: Any?) {
-        // Sync the General-pane startup checkbox with SMAppService on every
-        // show, in case the user toggled it from System Settings while the
-        // app was running.
         generalPane.refreshState()
         super.showWindow(sender)
     }
@@ -82,40 +57,55 @@ final class ConfigWindowController: NSWindowController {
     }
 
     private func makeContentView() -> NSView {
-        tabView.tabViewType = .topTabsBezelBorder
-        tabView.translatesAutoresizingMaskIntoConstraints = false
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.distribution = .fill
+        stack.spacing = 20
+        stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+        stack.translatesAutoresizingMaskIntoConstraints = false
 
-        let generalTab = NSTabViewItem(identifier: "general")
-        generalTab.label = "General"
-        generalTab.view = generalPane.view
-        tabView.addTabViewItem(generalTab)
+        let optionsSection = makeOptionsSection()
+        optionsSection.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(optionsSection)
 
-        let rulesTab = NSTabViewItem(identifier: "user-rules")
-        rulesTab.label = "User Rules"
-        rulesTab.view = rulesPane.view
-        tabView.addTabViewItem(rulesTab)
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(divider)
 
-        let builtInsTab = NSTabViewItem(identifier: "built-in-rules")
-        builtInsTab.label = "Built-in Rules"
-        builtInsTab.view = builtInRulesPane.view
-        tabView.addTabViewItem(builtInsTab)
+        let rulesView = rulesPane.view
+        rulesView.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(rulesView)
 
-        let publishersTab = NSTabViewItem(identifier: "publishers")
-        publishersTab.label = "Trusted Publishers"
-        publishersTab.view = publishersPane.view
-        tabView.addTabViewItem(publishersTab)
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.documentView = stack
 
-        // Wrap the tab view in a container so we can pin it to the
-        // window's content rect with a uniform margin — the bezel draws
-        // against the inset edges, not flush with the title bar.
-        let container = NSView()
-        container.addSubview(tabView)
+        // Width the inner stack to match the visible scroll-view width so
+        // child views (rule table, detail form) can stretch horizontally
+        // instead of clipping to their intrinsic size.
         NSLayoutConstraint.activate([
-            tabView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            tabView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            tabView.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            tabView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            stack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            divider.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16),
+            divider.trailingAnchor.constraint(equalTo: stack.trailingAnchor, constant: -16),
+            rulesView.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            rulesView.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
         ])
-        return container
+        return scroll
+    }
+
+    /// Build the Options section header + the moved-in "Run on startup"
+    /// checkbox. The GeneralPane's `view` already lays out the header,
+    /// subhead, and checkbox; reuse it as-is so the SMAppService wiring
+    /// stays self-contained.
+    private func makeOptionsSection() -> NSView {
+        return generalPane.view
     }
 }

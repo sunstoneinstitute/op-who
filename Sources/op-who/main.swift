@@ -11,7 +11,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // the watcher so each detection drops an entry into the ring buffer.
     let ruleStore = RequestRuleStore()
     let recentStore = RecentRequestsStore()
-    let publisherStore = TrustedPublisherStore()
     var configController: ConfigWindowController?
 
     override init() {
@@ -19,9 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Wire stores to the globals BEFORE any detection happens, then
         // seed the globals with the loaded values.
         ruleStore.onRulesChanged = { OpWhoConfig.rules = $0 }
-        publisherStore.onPublishersChanged = { OpWhoConfig.trustedTeamIDs = $0.map { $0.teamID } }
         OpWhoConfig.rules = ruleStore.allRules
-        OpWhoConfig.trustedTeamIDs = publisherStore.publishers.map { $0.teamID }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -174,8 +171,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if configController == nil {
             configController = ConfigWindowController(
                 ruleStore: ruleStore,
-                recentStore: recentStore,
-                publisherStore: publisherStore
+                recentStore: recentStore
             )
         }
         // LSUIElement apps don't get activated by clicking a menu item;

@@ -1,16 +1,17 @@
 import AppKit
 import OpWhoLib
 
-/// User Rules tab inside the Configure window. Master/detail editor for
-/// the user-authored rule list (which runs *before* any enabled built-in
-/// via `RequestRuleStore.allRules`). Hosted by `ConfigWindowController`
-/// via an NSTabView; owns no window of its own. The `view` property is
-/// built lazily and kept; the host adds it to the tab item.
+/// Unified rules section inside the Settings window. Master/detail editor
+/// for every rule the engine evaluates — user-authored rules at the top
+/// (they run first via `RequestRuleStore.allRules`), followed by the
+/// built-ins shipped with op-who. Each row has an Enabled checkbox:
+///   - User rules: flips `rule.enabled` on the stored rule.
+///   - Built-ins: toggles `disabledBuiltInIDs` membership.
+/// Built-in rows render with a read-only detail form; users clone them
+/// (via the + menu's "Clone Selected Rule" item) to customize.
 ///
 /// `presenter` is a weak reference to the window that should own any
-/// modal sheet this pane opens (the "Add rule from recent request"
-/// picker). It's set after the host window exists, in the
-/// `ConfigWindowController` init.
+/// modal sheet this pane opens. The host sets it after the window exists.
 final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     private let store: RequestRuleStore
@@ -18,7 +19,7 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     weak var presenter: NSWindow?
 
     private let tableView = NSTableView()
-    private var selectedIndex: Int? { tableView.selectedRow >= 0 ? tableView.selectedRow : nil }
+    private var selectedRuleID: UUID? = nil
     private var addSheet: AddRuleSheetController?
 
     // Detail form controls.
@@ -32,9 +33,26 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let regexSourcePopup = NSPopUpButton()
     private let regexPatternField = NSTextField()
     private let templateField = NSTextField()
+    private let commentView = NSTextView()
+    private let commentScroll = NSScrollView()
     private let replacesActorCheckbox = NSButton(checkboxWithTitle: "Replaces actor (full title)", target: nil, action: nil)
     private let isWarningCheckbox = NSButton(checkboxWithTitle: "Render as warning", target: nil, action: nil)
     private let kindPopup = NSPopUpButton()
+    private let detailBox = NSBox()
+    private let builtInNotice = NSTextField(
+        labelWithString: "Built-in rule — read-only. Use “+ → Clone Selected Rule” to make an editable copy."
+    )
+
+    /// Editable detail controls, gathered once so we can flip them all to
+    /// disabled (read-only) when a built-in is selected.
+    private var editableControls: [NSControl] {
+        [
+            nameField, processNameField, subcommandField, argvContainsAllField,
+            triggerCwdPrefixField, regexPatternField, templateField,
+            binaryVerifiedPopup, pluginUpdatePopup, regexSourcePopup,
+            kindPopup, replacesActorCheckbox, isWarningCheckbox,
+        ]
+    }
 
     private(set) lazy var view: NSView = makeContentView()
 
@@ -44,9 +62,14 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         super.init()
         _ = view // force-build so initial selection takes effect
         reloadTable()
-        if !store.userRules.isEmpty {
+        // Select first row (which will be the first user rule if any,
+        // otherwise the first built-in).
+        let rules = store.allRules
+        if !rules.isEmpty {
+            selectedRuleID = rules[0].id
             tableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
+        loadDetailFromSelection()
     }
 
     // MARK: - Layout
@@ -54,17 +77,18 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private func makeContentView() -> NSView {
         let container = NSView()
 
-        let header = NSTextField(labelWithString: "User-authored rules (evaluated before built-ins)")
+        let header = NSTextField(labelWithString: "Rules")
         header.font = NSFont.boldSystemFont(ofSize: 13)
 
         let subhead = NSTextField(labelWithString:
-            "Rules in this list run before any enabled built-in, so you can shadow a built-in without disabling it. " +
-            "Each rule's matcher is evaluated against the trigger process, its argv, and its cwd; first match wins."
+            "User-authored rules at the top run first; built-ins follow. " +
+            "Each rule's matcher is evaluated against the trigger process, its argv, and its cwd; first enabled match wins. " +
+            "Toggle the Enabled checkbox to skip a rule without removing it."
         )
         subhead.font = NSFont.systemFont(ofSize: 11)
         subhead.textColor = .secondaryLabelColor
         subhead.lineBreakMode = .byWordWrapping
-        subhead.maximumNumberOfLines = 2
+        subhead.maximumNumberOfLines = 3
 
         let tableScroll = makeTableScroll()
         let buttonBar = makeButtonBar()
@@ -89,14 +113,14 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             detail.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
             detail.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
 
-            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 14),
+            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 6),
             subhead.topAnchor.constraint(equalTo: header.bottomAnchor, constant: spacing),
             tableScroll.topAnchor.constraint(equalTo: subhead.bottomAnchor, constant: spacing),
             buttonBar.topAnchor.constraint(equalTo: tableScroll.bottomAnchor, constant: spacing),
             detail.topAnchor.constraint(equalTo: buttonBar.bottomAnchor, constant: spacing),
             detail.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -14),
 
-            tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 200),
+            tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 260),
         ])
         return container
     }
@@ -112,12 +136,19 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
 
-        let indexCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("index"))
-        indexCol.title = "#"
-        indexCol.width = 30
-        indexCol.minWidth = 24
-        indexCol.maxWidth = 50
-        tableView.addTableColumn(indexCol)
+        let enabledCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("enabled"))
+        enabledCol.title = ""
+        enabledCol.width = 24
+        enabledCol.minWidth = 24
+        enabledCol.maxWidth = 30
+        tableView.addTableColumn(enabledCol)
+
+        let originCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("origin"))
+        originCol.title = ""
+        originCol.width = 70
+        originCol.minWidth = 60
+        originCol.maxWidth = 80
+        tableView.addTableColumn(originCol)
 
         let nameCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
         nameCol.title = "Name"
@@ -143,17 +174,33 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         bar.orientation = .horizontal
         bar.spacing = 8
 
-        let addRemove = NSSegmentedControl(
-            images: [
-                NSImage(systemSymbolName: "plus", accessibilityDescription: "Add rule")!,
-                NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove selected rule")!,
-            ],
-            trackingMode: .momentary,
+        // macOS-idiomatic "+ with options": NSPopUpButton in pull-down
+        // mode. The first item is an icon-only placeholder that NSPopUp
+        // uses as the button face; subsequent items are the actions.
+        let plusButton = NSPopUpButton(frame: .zero, pullsDown: true)
+        let face = NSMenuItem()
+        face.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add rule")
+        plusButton.menu?.addItem(face)
+        let blank = NSMenuItem(title: "Blank Rule", action: #selector(addBlank(_:)), keyEquivalent: "")
+        blank.target = self
+        plusButton.menu?.addItem(blank)
+        let fromRecent = NSMenuItem(title: "From Recent Request…", action: #selector(addFromRecent(_:)), keyEquivalent: "")
+        fromRecent.target = self
+        plusButton.menu?.addItem(fromRecent)
+        let clone = NSMenuItem(title: "Clone Selected Rule", action: #selector(addClone(_:)), keyEquivalent: "")
+        clone.target = self
+        plusButton.menu?.addItem(clone)
+        plusButton.setContentHuggingPriority(.required, for: .horizontal)
+        bar.addArrangedSubview(plusButton)
+
+        let removeButton = NSButton(
+            image: NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove selected user rule")!,
             target: self,
-            action: #selector(addRemoveAction(_:))
+            action: #selector(removeSelected(_:))
         )
-        addRemove.segmentStyle = .smallSquare
-        bar.addArrangedSubview(addRemove)
+        removeButton.bezelStyle = .smallSquare
+        removeButton.setContentHuggingPriority(.required, for: .horizontal)
+        bar.addArrangedSubview(removeButton)
 
         let upDown = NSSegmentedControl(
             images: [
@@ -171,16 +218,15 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         bar.addArrangedSubview(spacer)
 
-        let reset = NSButton(title: "Remove All", target: self, action: #selector(resetAction(_:)))
+        let reset = NSButton(title: "Remove All User Rules", target: self, action: #selector(resetAction(_:)))
         bar.addArrangedSubview(reset)
 
         return bar
     }
 
     private func makeDetailForm() -> NSView {
-        let box = NSBox()
-        box.title = "Selected rule"
-        box.titleFont = NSFont.systemFont(ofSize: 11)
+        detailBox.title = "Selected rule"
+        detailBox.titleFont = NSFont.systemFont(ofSize: 11)
 
         let grid = NSGridView()
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -203,9 +249,6 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         pluginUpdatePopup.target = self
         pluginUpdatePopup.action = #selector(detailChanged(_:))
 
-        // Index 0 is "(none)" — disables the regex predicate entirely.
-        // Subsequent items are the RegexCaptureSource cases, in
-        // declaration order, displayed by rawValue.
         regexSourcePopup.addItems(withTitles: ["(none)"] + RegexCaptureSource.allCases.map { $0.rawValue })
         regexSourcePopup.target = self
         regexSourcePopup.action = #selector(detailChanged(_:))
@@ -224,6 +267,21 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         isWarningCheckbox.target = self
         isWarningCheckbox.action = #selector(detailChanged(_:))
 
+        commentView.delegate = self
+        commentView.isRichText = false
+        commentView.font = NSFont.systemFont(ofSize: 12)
+        commentView.textContainerInset = NSSize(width: 4, height: 4)
+        commentScroll.borderType = .bezelBorder
+        commentScroll.hasVerticalScroller = true
+        commentScroll.documentView = commentView
+        commentScroll.translatesAutoresizingMaskIntoConstraints = false
+        commentScroll.heightAnchor.constraint(equalToConstant: 56).isActive = true
+        commentScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 560).isActive = true
+
+        builtInNotice.font = NSFont.systemFont(ofSize: 11)
+        builtInNotice.textColor = .secondaryLabelColor
+        builtInNotice.isHidden = true
+
         grid.addRow(with: [label("Name"), nameField])
         grid.addRow(with: [label("Process name"), processNameField])
         grid.addRow(with: [label("Subcommand"), subcommandField])
@@ -234,16 +292,13 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         grid.addRow(with: [label("Regex source"), regexSourcePopup])
         grid.addRow(with: [label("Regex pattern"), regexPatternField])
         grid.addRow(with: [label("Template"), templateField])
+        grid.addRow(with: [label("Comment"), commentScroll])
         grid.addRow(with: [label("Kind"), kindPopup])
         grid.addRow(with: [NSView(), replacesActorCheckbox])
         grid.addRow(with: [NSView(), isWarningCheckbox])
+        grid.addRow(with: [NSView(), builtInNotice])
 
         grid.column(at: 0).xPlacement = .leading
-        // Pin column 0 to a width that fits the widest label ("Trigger CWD
-        // prefix") with a little breathing room. Without an explicit width
-        // NSGridView dumps slack from the stretched grid into column 0,
-        // which leaves the editable fields stranded against the right edge
-        // instead of sitting right next to their labels.
         grid.column(at: 0).width = 140
         grid.column(at: 1).xPlacement = .fill
 
@@ -255,8 +310,8 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             grid.topAnchor.constraint(equalTo: content.topAnchor, constant: 6),
             grid.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8),
         ])
-        box.contentView = content
-        return box
+        detailBox.contentView = content
+        return detailBox
     }
 
     private func configureField(_ field: NSTextField, placeholder: String) {
@@ -276,25 +331,52 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     // MARK: - Table
 
-    func numberOfRows(in tableView: NSTableView) -> Int { store.userRules.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { store.allRules.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard let col = tableColumn else { return nil }
-        let id = NSUserInterfaceItemIdentifier("cell_\(col.identifier.rawValue)")
-        let cell: NSTableCellView = (tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView) ?? makeCellView(id: id)
-        let rule = store.userRules[row]
+        let rules = store.allRules
+        guard row < rules.count else { return nil }
+        let rule = rules[row]
+
         switch col.identifier.rawValue {
-        case "index": cell.textField?.stringValue = String(row + 1)
-        case "name": cell.textField?.stringValue = rule.name
-        case "when":
-            cell.textField?.stringValue = rule.matcher.displaySummary
-            cell.textField?.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        case "then":
-            cell.textField?.stringValue = rule.template
-            cell.textField?.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        default: break
+        case "enabled":
+            let id = NSUserInterfaceItemIdentifier("cell_enabled")
+            let cell: EnabledCheckboxCell
+            if let existing = tableView.makeView(withIdentifier: id, owner: self) as? EnabledCheckboxCell {
+                cell = existing
+            } else {
+                cell = EnabledCheckboxCell()
+                cell.identifier = id
+            }
+            cell.configure(ruleID: rule.id, enabled: rule.enabled) { [weak self] ruleID, newValue in
+                self?.store.setRuleEnabled(id: ruleID, enabled: newValue)
+                self?.reloadTable()
+            }
+            return cell
+        default:
+            let id = NSUserInterfaceItemIdentifier("cell_\(col.identifier.rawValue)")
+            let cell: NSTableCellView = (tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView) ?? makeCellView(id: id)
+            switch col.identifier.rawValue {
+            case "origin":
+                cell.textField?.stringValue = (rule.builtInID == nil) ? "User" : "Built-in"
+                cell.textField?.font = NSFont.systemFont(ofSize: 11)
+                cell.textField?.textColor = (rule.builtInID == nil) ? .labelColor : .secondaryLabelColor
+            case "name":
+                cell.textField?.stringValue = rule.name
+                cell.textField?.textColor = rule.enabled ? .labelColor : .disabledControlTextColor
+            case "when":
+                cell.textField?.stringValue = rule.matcher.displaySummary
+                cell.textField?.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+                cell.textField?.textColor = rule.enabled ? .labelColor : .disabledControlTextColor
+            case "then":
+                cell.textField?.stringValue = rule.template
+                cell.textField?.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+                cell.textField?.textColor = rule.enabled ? .labelColor : .disabledControlTextColor
+            default: break
+            }
+            return cell
         }
-        return cell
     }
 
     private func makeCellView(id: NSUserInterfaceItemIdentifier) -> NSTableCellView {
@@ -315,73 +397,35 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
+        let row = tableView.selectedRow
+        let rules = store.allRules
+        if row >= 0 && row < rules.count {
+            selectedRuleID = rules[row].id
+        } else {
+            selectedRuleID = nil
+        }
         loadDetailFromSelection()
     }
 
     // MARK: - Actions
 
-    @objc private func addRemoveAction(_ sender: NSSegmentedControl) {
-        switch sender.selectedSegment {
-        case 0: addNewRule()
-        case 1: removeSelectedRule()
-        default: break
-        }
+    @objc private func addBlank(_ sender: Any?) {
+        insertUserRule(emptyTemplateRule())
     }
 
-    @objc private func moveAction(_ sender: NSSegmentedControl) {
-        switch sender.selectedSegment {
-        case 0: moveSelected(by: -1)
-        case 1: moveSelected(by: +1)
-        default: break
-        }
-    }
-
-    @objc private func resetAction(_ sender: Any?) {
-        let alert = NSAlert()
-        alert.messageText = "Remove all user rules?"
-        alert.informativeText = "Your user-authored rules will be deleted. Built-in rules remain unchanged — manage them in the Built-in Rules tab."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        store.clearUserRules()
-        reloadTable()
-        loadDetailFromSelection()
-    }
-
-    @objc private func detailChanged(_ sender: Any?) {
-        guard let index = selectedIndex else { return }
-        var rule = store.userRules[index]
-        rule.name = nameField.stringValue
-        rule.matcher = currentMatcherFromForm()
-        rule.template = templateField.stringValue
-        rule.replacesActor = (replacesActorCheckbox.state == .on)
-        rule.isWarning = (isWarningCheckbox.state == .on)
-        if let raw = kindPopup.titleOfSelectedItem,
-           let kind = RequestKind(rawValue: raw) {
-            rule.kind = kind
-        }
-        var rules = store.userRules
-        rules[index] = rule
-        store.setUserRules(rules)
-        tableView.reloadData(forRowIndexes: IndexSet(integer: index), columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns))
-    }
-
-    // MARK: - Mutations
-
-    private func addNewRule() {
+    @objc private func addFromRecent(_ sender: Any?) {
         let recents = recentStore.requests.reversed()
         guard !recents.isEmpty else {
-            insertRule(emptyTemplateRule())
+            insertUserRule(emptyTemplateRule())
             return
         }
         let sheet = AddRuleSheetController(recents: Array(recents)) { [weak self] result in
             guard let self = self else { return }
             switch result {
             case .none: break
-            case .some(.empty): self.insertRule(self.emptyTemplateRule())
+            case .some(.empty): self.insertUserRule(self.emptyTemplateRule())
             case .some(.fromRecent(let recent)):
-                self.insertRule(self.ruleFromRecent(recent))
+                self.insertUserRule(self.ruleFromRecent(recent))
             }
             self.addSheet = nil
         }
@@ -391,13 +435,132 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         }
     }
 
-    private func insertRule(_ rule: RequestRule) {
+    @objc private func addClone(_ sender: Any?) {
+        guard let id = selectedRuleID,
+              let source = store.allRules.first(where: { $0.id == id }) else {
+            NSSound.beep()
+            return
+        }
+        // Strip the built-in identity from the clone so it lives as a
+        // standalone user rule. Fresh UUID, "Copy of …" name, enabled by
+        // default regardless of the source's enabled state.
+        let clone = RequestRule(
+            id: UUID(),
+            name: "Copy of \(source.name)",
+            matcher: source.matcher,
+            template: source.template,
+            replacesActor: source.replacesActor,
+            kind: source.kind,
+            isWarning: source.isWarning,
+            comment: source.comment,
+            enabled: true,
+            builtInID: nil
+        )
+        insertUserRule(clone)
+    }
+
+    @objc private func removeSelected(_ sender: Any?) {
+        guard let id = selectedRuleID,
+              let idx = store.userRules.firstIndex(where: { $0.id == id }) else {
+            // Built-in selected — removing isn't allowed; flash with a beep.
+            NSSound.beep()
+            return
+        }
         var rules = store.userRules
-        let target = (selectedIndex.map { $0 + 1 }) ?? rules.count
+        rules.remove(at: idx)
+        store.setUserRules(rules)
+        reloadTable()
+        let allRules = store.allRules
+        if !allRules.isEmpty {
+            let nextIdx = min(idx, allRules.count - 1)
+            selectedRuleID = allRules[nextIdx].id
+            tableView.selectRowIndexes(IndexSet(integer: nextIdx), byExtendingSelection: false)
+        } else {
+            selectedRuleID = nil
+        }
+        loadDetailFromSelection()
+    }
+
+    @objc private func moveAction(_ sender: NSSegmentedControl) {
+        let delta: Int
+        switch sender.selectedSegment {
+        case 0: delta = -1
+        case 1: delta = +1
+        default: return
+        }
+        moveSelected(by: delta)
+    }
+
+    @objc private func resetAction(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "Remove all user rules?"
+        alert.informativeText = "Your user-authored rules will be deleted. Built-in rules remain unchanged — toggle their checkboxes in the table to enable or disable them."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Remove")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        store.clearUserRules()
+        selectedRuleID = nil
+        reloadTable()
+        loadDetailFromSelection()
+    }
+
+    @objc private func detailChanged(_ sender: Any?) {
+        commitDetail()
+    }
+
+    private func commitDetail() {
+        guard let id = selectedRuleID,
+              let idx = store.userRules.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        var rule = store.userRules[idx]
+        rule.name = nameField.stringValue
+        rule.matcher = currentMatcherFromForm()
+        rule.template = templateField.stringValue
+        rule.comment = commentView.string.isEmpty ? nil : commentView.string
+        rule.replacesActor = (replacesActorCheckbox.state == .on)
+        rule.isWarning = (isWarningCheckbox.state == .on)
+        if let raw = kindPopup.titleOfSelectedItem,
+           let kind = RequestKind(rawValue: raw) {
+            rule.kind = kind
+        }
+        var rules = store.userRules
+        rules[idx] = rule
+        store.setUserRules(rules)
+        // Reload only the affected row, keeping selection.
+        let allRules = store.allRules
+        if let visIdx = allRules.firstIndex(where: { $0.id == id }) {
+            tableView.reloadData(
+                forRowIndexes: IndexSet(integer: visIdx),
+                columnIndexes: IndexSet(integersIn: 0..<tableView.numberOfColumns)
+            )
+        }
+    }
+
+    // MARK: - Mutations
+
+    private func insertUserRule(_ rule: RequestRule) {
+        var rules = store.userRules
+        // Insert after the selected user rule, if any; otherwise append
+        // (which still places it ahead of all built-ins, since user rules
+        // come first in `allRules`).
+        let target: Int = {
+            if let id = selectedRuleID,
+               let idx = rules.firstIndex(where: { $0.id == id }) {
+                return idx + 1
+            }
+            return rules.count
+        }()
         rules.insert(rule, at: target)
         store.setUserRules(rules)
         reloadTable()
-        tableView.selectRowIndexes(IndexSet(integer: target), byExtendingSelection: false)
+        selectedRuleID = rule.id
+        if let visIdx = store.allRules.firstIndex(where: { $0.id == rule.id }) {
+            tableView.selectRowIndexes(IndexSet(integer: visIdx), byExtendingSelection: false)
+            tableView.scrollRowToVisible(visIdx)
+        }
+        loadDetailFromSelection()
     }
 
     private func emptyTemplateRule() -> RequestRule {
@@ -464,38 +627,35 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         )
     }
 
-    private func removeSelectedRule() {
-        guard let index = selectedIndex else { return }
-        var rules = store.userRules
-        rules.remove(at: index)
-        store.setUserRules(rules)
-        reloadTable()
-        if !rules.isEmpty {
-            let nextSelection = min(index, rules.count - 1)
-            tableView.selectRowIndexes(IndexSet(integer: nextSelection), byExtendingSelection: false)
-        }
-    }
-
     private func moveSelected(by delta: Int) {
-        guard let index = selectedIndex else { return }
-        let target = index + delta
-        guard target >= 0, target < store.userRules.count, target != index else { return }
+        guard let id = selectedRuleID,
+              let idx = store.userRules.firstIndex(where: { $0.id == id }) else {
+            // Reordering only applies to user rules (built-ins ship in a
+            // fixed order). Beep so the user knows nothing happened.
+            NSSound.beep()
+            return
+        }
+        let target = idx + delta
+        guard target >= 0, target < store.userRules.count, target != idx else { return }
         var rules = store.userRules
-        let rule = rules.remove(at: index)
+        let rule = rules.remove(at: idx)
         rules.insert(rule, at: target)
         store.setUserRules(rules)
         reloadTable()
-        tableView.selectRowIndexes(IndexSet(integer: target), byExtendingSelection: false)
+        if let visIdx = store.allRules.firstIndex(where: { $0.id == id }) {
+            tableView.selectRowIndexes(IndexSet(integer: visIdx), byExtendingSelection: false)
+        }
     }
 
     // MARK: - Detail form ↔ rule
 
     private func loadDetailFromSelection() {
-        guard let index = selectedIndex else {
+        guard let id = selectedRuleID,
+              let rule = store.allRules.first(where: { $0.id == id }) else {
             clearDetail()
+            setEditable(true)
             return
         }
-        let rule = store.userRules[index]
         nameField.stringValue = rule.name
         processNameField.stringValue = rule.matcher.processName?.joined(separator: ",") ?? ""
         subcommandField.stringValue = rule.matcher.subcommand?.joined(separator: ",") ?? ""
@@ -519,9 +679,17 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             regexPatternField.stringValue = ""
         }
         templateField.stringValue = rule.template
+        commentView.string = rule.comment ?? ""
         replacesActorCheckbox.state = rule.replacesActor ? .on : .off
         isWarningCheckbox.state = rule.isWarning ? .on : .off
         kindPopup.selectItem(withTitle: rule.kind.rawValue)
+
+        let isBuiltIn = (rule.builtInID != nil)
+        setEditable(!isBuiltIn)
+        builtInNotice.isHidden = !isBuiltIn
+        detailBox.title = isBuiltIn
+            ? "Selected rule (built-in — read only)"
+            : "Selected rule"
     }
 
     private func clearDetail() {
@@ -535,9 +703,20 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
         regexSourcePopup.selectItem(at: 0)
         regexPatternField.stringValue = ""
         templateField.stringValue = ""
+        commentView.string = ""
         replacesActorCheckbox.state = .off
         isWarningCheckbox.state = .off
         kindPopup.selectItem(at: 3)
+        builtInNotice.isHidden = true
+        detailBox.title = "Selected rule"
+    }
+
+    private func setEditable(_ editable: Bool) {
+        for control in editableControls {
+            control.isEnabled = editable
+        }
+        commentView.isEditable = editable
+        commentView.isSelectable = true // selectable even when read-only so users can copy
     }
 
     private func currentMatcherFromForm() -> RequestMatcher {
@@ -559,9 +738,6 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
             default: return nil
             }
         }()
-        // Regex source popup: index 0 is "(none)" → drop the predicate.
-        // Index N>0 maps to RegexCaptureSource.allCases[N-1] (same
-        // ordering used to populate the menu).
         let regex: RegexCapture? = {
             let idx = regexSourcePopup.indexOfSelectedItem
             guard idx > 0, idx - 1 < RegexCaptureSource.allCases.count else { return nil }
@@ -590,17 +766,59 @@ final class RulesPane: NSObject, NSTableViewDataSource, NSTableViewDelegate {
 
     private func reloadTable() {
         tableView.reloadData()
+        // Keep the visual selection aligned with `selectedRuleID` after
+        // mutations that shift indices (e.g. adding a user rule above
+        // built-ins).
+        if let id = selectedRuleID,
+           let idx = store.allRules.firstIndex(where: { $0.id == id }) {
+            tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
+        }
+    }
+}
+
+// MARK: - NSTextViewDelegate
+
+extension RulesPane: NSTextViewDelegate {
+    func textDidChange(_ notification: Notification) {
+        commitDetail()
+    }
+}
+
+// MARK: - Enabled checkbox cell
+
+/// Custom table cell that hosts a checkbox bound to a rule's `enabled`
+/// flag. The cell stashes the rule's UUID so the action can route the
+/// new state back to the store without depending on row indices, which
+/// may shift between the time the cell is configured and the time the
+/// checkbox fires (the store mutates and the table reloads).
+private final class EnabledCheckboxCell: NSTableCellView {
+
+    private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private var ruleID: UUID?
+    private var onToggle: ((UUID, Bool) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        checkbox.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(checkbox)
+        NSLayoutConstraint.activate([
+            checkbox.centerXAnchor.constraint(equalTo: centerXAnchor),
+            checkbox.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        checkbox.target = self
+        checkbox.action = #selector(toggle(_:))
     }
 
-    /// Reload the table to pick up rules appended by another pane (the
-    /// Built-ins pane's "Copy as User Rule" action) and select the row
-    /// matching the supplied UUID. Selecting it programmatically fires
-    /// `tableViewSelectionDidChange`, which repopulates the detail form
-    /// from the new clone's matcher.
-    func reloadAndSelect(ruleID: UUID) {
-        reloadTable()
-        guard let idx = store.userRules.firstIndex(where: { $0.id == ruleID }) else { return }
-        tableView.selectRowIndexes(IndexSet(integer: idx), byExtendingSelection: false)
-        tableView.scrollRowToVisible(idx)
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    func configure(ruleID: UUID, enabled: Bool, onToggle: @escaping (UUID, Bool) -> Void) {
+        self.ruleID = ruleID
+        self.onToggle = onToggle
+        checkbox.state = enabled ? .on : .off
+    }
+
+    @objc private func toggle(_ sender: NSButton) {
+        guard let id = ruleID else { return }
+        onToggle?(id, sender.state == .on)
     }
 }

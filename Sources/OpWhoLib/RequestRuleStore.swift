@@ -52,15 +52,23 @@ public final class RequestRuleStore {
         self.disabledBuiltInIDs = Set(loaded.disabledBuiltInIDs)
     }
 
-    /// Merged view used by the engine. User rules run first (so they
-    /// can shadow built-ins); enabled built-ins follow in their shipped
-    /// order. Built-ins whose `builtInID` appears in `disabledBuiltInIDs`
-    /// are dropped.
+    /// Merged view used by the engine and the Settings UI. User rules
+    /// run first (so they can shadow built-ins); built-ins follow in
+    /// their shipped order. Disabled built-ins are still **included**
+    /// here — with `enabled = false` — so the UI can render them as
+    /// greyed-out rows. The engine itself skips any rule whose
+    /// `enabled` is false, so the visible-but-disabled built-ins do
+    /// not produce matches.
     public var allRules: [RequestRule] {
-        userRules + RequestRule.builtIns.filter { rule in
-            guard let id = rule.builtInID else { return true }
-            return !disabledBuiltInIDs.contains(id)
+        let visibleBuiltIns = RequestRule.builtIns.map { rule -> RequestRule in
+            guard let id = rule.builtInID, disabledBuiltInIDs.contains(id) else {
+                return rule
+            }
+            var copy = rule
+            copy.enabled = false
+            return copy
         }
+        return userRules + visibleBuiltIns
     }
 
     // MARK: - User-rule mutations
@@ -81,7 +89,6 @@ public final class RequestRuleStore {
     // MARK: - Built-in toggle
 
     /// Enable or disable a shipped built-in by its stable `builtInID`.
-    /// Disabling removes it from `allRules`; enabling restores it.
     /// Calling with an unknown ID still updates the set (harmless and
     /// keeps the contract simple).
     public func setBuiltInDisabled(id: String, disabled: Bool) {
@@ -91,6 +98,22 @@ public final class RequestRuleStore {
             disabledBuiltInIDs.remove(id)
         }
         save()
+    }
+
+    /// Single entry point used by the unified rules table: flip the
+    /// `enabled` flag for the rule with this UUID, whether it lives in
+    /// `userRules` (mutate the field) or in `RequestRule.builtIns`
+    /// (mutate `disabledBuiltInIDs`).
+    public func setRuleEnabled(id: UUID, enabled: Bool) {
+        if let idx = userRules.firstIndex(where: { $0.id == id }) {
+            userRules[idx].enabled = enabled
+            save()
+            return
+        }
+        if let builtIn = RequestRule.builtIns.first(where: { $0.id == id }),
+           let builtInID = builtIn.builtInID {
+            setBuiltInDisabled(id: builtInID, disabled: !enabled)
+        }
     }
 
     /// Re-enable every built-in (clears `disabledBuiltInIDs`). Useful

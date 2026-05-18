@@ -429,8 +429,16 @@ struct StoresTests {
         #expect(reloaded.userRules.count == 1)
         #expect(reloaded.userRules.first?.name == "Custom")
         #expect(reloaded.disabledBuiltInIDs == ["git-fallback", "ssh"])
-        #expect(!reloaded.allRules.contains { $0.builtInID == "git-fallback" })
-        #expect(!reloaded.allRules.contains { $0.builtInID == "ssh" })
+        // allRules now includes disabled built-ins so the Settings UI can
+        // render them as greyed-out rows; the engine skips any rule whose
+        // `enabled` is false. Verify both: the entries are present, but
+        // their `enabled` flag is off.
+        let gitFallback = reloaded.allRules.first { $0.builtInID == "git-fallback" }
+        let ssh = reloaded.allRules.first { $0.builtInID == "ssh" }
+        #expect(gitFallback != nil)
+        #expect(ssh != nil)
+        #expect(gitFallback?.enabled == false)
+        #expect(ssh?.enabled == false)
     }
 
     @Test func ruleStoreClearsUserRulesWithoutTouchingBuiltIns() {
@@ -443,6 +451,94 @@ struct StoresTests {
         store.clearUserRules()
         #expect(store.userRules.isEmpty)
         #expect(store.disabledBuiltInIDs == ["ssh"])  // untouched
+    }
+
+    /// `setRuleEnabled` is the single API the unified rules table uses,
+    /// so it must route by ID — flipping the field on user rules and
+    /// flipping the disabled-built-in set for built-ins.
+    @Test func setRuleEnabledRoutesUserVsBuiltIn() {
+        let url = tempDir().appendingPathComponent("rules.json")
+        let store = RequestRuleStore(fileURL: url)
+        let userRule = RequestRule(
+            name: "U", matcher: RequestMatcher(processName: ["ssh"]),
+            template: "u", kind: .ssh
+        )
+        store.setUserRules([userRule])
+
+        // Disable a user rule by ID.
+        store.setRuleEnabled(id: userRule.id, enabled: false)
+        #expect(store.userRules.first?.enabled == false)
+
+        // Re-enable it.
+        store.setRuleEnabled(id: userRule.id, enabled: true)
+        #expect(store.userRules.first?.enabled == true)
+
+        // Disable a built-in by its per-process UUID.
+        let sshBuiltIn = RequestRule.builtIn(id: "ssh")!
+        store.setRuleEnabled(id: sshBuiltIn.id, enabled: false)
+        #expect(store.disabledBuiltInIDs.contains("ssh"))
+    }
+
+    /// The engine must skip any rule with `enabled == false`, whether
+    /// that rule is a user rule or a built-in that the user has toggled
+    /// off via the Settings checkbox.
+    @Test func engineSkipsDisabledRules() {
+        let userRule = RequestRule(
+            name: "shadow",
+            matcher: RequestMatcher(processName: ["ssh"]),
+            template: "user-template",
+            kind: .ssh,
+            enabled: false
+        )
+        let sshBuiltIn = RequestRule.builtIn(id: "ssh")!
+        let chain = [node("ssh")]
+        let context = ctx(chain: chain)
+
+        // With the disabled user rule first, the engine should fall through
+        // to the built-in.
+        let result = RequestRuleEngine.evaluate(
+            rules: [userRule, sshBuiltIn], context: context
+        )
+        #expect(result?.rule.builtInID == "ssh")
+    }
+
+    /// The `comment` field on a rule must round-trip through JSON so
+    /// users' notes survive a relaunch.
+    @Test func commentFieldRoundTripsThroughJSON() throws {
+        let url = tempDir().appendingPathComponent("rules.json")
+        let store = RequestRuleStore(fileURL: url)
+        let userRule = RequestRule(
+            name: "with-comment",
+            matcher: RequestMatcher(processName: ["op"]),
+            template: "x",
+            kind: .onePasswordCLI,
+            comment: "Friendly reminder: this rule shadows the op-read built-in."
+        )
+        store.setUserRules([userRule])
+
+        let reloaded = RequestRuleStore(fileURL: url)
+        #expect(reloaded.userRules.first?.comment ==
+            "Friendly reminder: this rule shadows the op-read built-in.")
+    }
+
+    /// Decoding a rule.json written by v0.5.x (no `enabled` or `comment`
+    /// keys) must succeed, with the defaults filled in. Tests the
+    /// custom Codable initializer that backstops the new fields.
+    @Test func ruleDecodesWithoutEnabledOrComment() throws {
+        let legacy = """
+        {
+          "id": "00000000-0000-0000-0000-000000000001",
+          "name": "legacy",
+          "matcher": {},
+          "template": "x",
+          "replacesActor": false,
+          "kind": "unknown",
+          "isWarning": false
+        }
+        """.data(using: .utf8)!
+        let rule = try JSONDecoder().decode(RequestRule.self, from: legacy)
+        #expect(rule.enabled == true)
+        #expect(rule.comment == nil)
     }
 
     @Test func ruleStoreEnableAllBuiltInsClearsDisabledSet() {

@@ -36,9 +36,9 @@ public struct MatchContext {
     /// (argv[0] may be a path; this is the short name the engine matches on.)
     public var triggerName: String { chain.first?.name ?? "" }
 
-    /// True iff the trigger binary's signing cert matches a publisher
-    /// in `OpWhoConfig.trustedTeamIDs`. ProcessTree only computes this
-    /// for `op` today; other processes always read false.
+    /// True iff the trigger binary is signed by 1Password's Apple Team
+    /// ID. ProcessTree only computes this for `op` today; other
+    /// processes always read false.
     public var binaryVerified: Bool { chain.first?.isVerifiedOnePasswordCLI ?? false }
 }
 
@@ -117,10 +117,10 @@ public struct RequestMatcher: Codable, Equatable {
     /// Trigger process's own CWD must start with this prefix. `~` is
     /// expanded to $HOME.
     public var triggerCwdPrefix: String?
-    /// The trigger binary's signing cert must (true) or must-not (false)
-    /// match a publisher in `OpWhoConfig.trustedTeamIDs`. Today the
-    /// signature is only computed for `op`; rules constraining this on
-    /// any other process will simply never match.
+    /// The trigger binary must (true) or must-not (false) be signed by
+    /// 1Password's Apple Team ID. Today the signature is only computed
+    /// for `op`; rules constraining this on any other process will
+    /// simply never match.
     public var binaryVerified: Bool?
     /// Plugin-update info must be present (true) or absent (false).
     public var requiresPluginUpdate: Bool?
@@ -237,6 +237,15 @@ public struct RequestRule: Codable, Equatable, Identifiable {
     public var replacesActor: Bool
     public var kind: RequestKind
     public var isWarning: Bool
+    /// Free-form human note attached to this rule. Surfaced in the
+    /// Settings UI; never used by the engine. Nil for built-ins by default.
+    public var comment: String?
+    /// User-facing on/off switch. False means the engine skips this rule
+    /// during evaluation, exactly as if it weren't in the list. For
+    /// built-ins this mirrors the legacy `disabledBuiltInIDs` set — the
+    /// store maintains both representations so older releases that only
+    /// read `disabledBuiltInIDs` still honour the user's intent.
+    public var enabled: Bool
     /// Stable, release-spanning identifier for rules shipped in
     /// `RequestRule.builtIns`. Nil for user-authored rules. Used by the
     /// store to track which built-ins the user has disabled and by
@@ -253,6 +262,8 @@ public struct RequestRule: Codable, Equatable, Identifiable {
         replacesActor: Bool = false,
         kind: RequestKind,
         isWarning: Bool = false,
+        comment: String? = nil,
+        enabled: Bool = true,
         builtInID: String? = nil
     ) {
         self.id = id
@@ -262,7 +273,30 @@ public struct RequestRule: Codable, Equatable, Identifiable {
         self.replacesActor = replacesActor
         self.kind = kind
         self.isWarning = isWarning
+        self.comment = comment
+        self.enabled = enabled
         self.builtInID = builtInID
+    }
+
+    /// Decoder that treats missing `enabled` / `comment` as defaults so
+    /// rules.json files written by v0.5.x decode cleanly.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(UUID.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.matcher = try c.decode(RequestMatcher.self, forKey: .matcher)
+        self.template = try c.decode(String.self, forKey: .template)
+        self.replacesActor = try c.decodeIfPresent(Bool.self, forKey: .replacesActor) ?? false
+        self.kind = try c.decode(RequestKind.self, forKey: .kind)
+        self.isWarning = try c.decodeIfPresent(Bool.self, forKey: .isWarning) ?? false
+        self.comment = try c.decodeIfPresent(String.self, forKey: .comment)
+        self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.builtInID = try c.decodeIfPresent(String.self, forKey: .builtInID)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, matcher, template, replacesActor, kind, isWarning
+        case comment, enabled, builtInID
     }
 }
 
@@ -275,9 +309,11 @@ public struct MatchResult: Equatable {
 public enum RequestRuleEngine {
     /// First-match-wins. A rule whose template references a placeholder
     /// that resolves to empty is treated as a non-match so the engine
-    /// falls through to the next rule.
+    /// falls through to the next rule. Rules with `enabled == false`
+    /// are skipped without being consulted.
     public static func evaluate(rules: [RequestRule], context: MatchContext) -> MatchResult? {
         for rule in rules {
+            guard rule.enabled else { continue }
             guard rule.matcher.matches(context) else { continue }
             let captures = rule.matcher.captures(in: context)
             guard let rendered = renderTemplate(rule.template, context: context, captures: captures) else {
@@ -686,18 +722,11 @@ extension RequestRule {
     }
 }
 
-/// Globals consulted by the engine and the signing checks. The app sets
-/// these once at startup from the user's stored configuration; tests get
-/// the built-in defaults.
+/// Globals consulted by the engine. The app sets these once at startup
+/// from the user's stored configuration; tests get the built-in defaults.
 public enum OpWhoConfig {
     /// Ordered rule list evaluated by `makeRequestSummary`. Composed by
-    /// the store as `userRules + (builtIns − disabledBuiltInIDs)`.
+    /// the store as user rules followed by the built-ins, with disabled
+    /// rules carrying `enabled = false`.
     public static var rules: [RequestRule] = RequestRule.builtIns
-    /// Apple Team IDs (subject.OU) that ProcessTree's signing-cert checks
-    /// treat as trusted for the matcher's `binaryVerified` predicate on
-    /// trigger binaries (currently only the `op` CLI). Does **not** govern
-    /// the AX-observer attach to the 1Password app — that is pinned to
-    /// 1Password's own Team ID inside `ProcessTree` so a user-added
-    /// publisher cannot let a non-1Password app pass as 1Password.
-    public static var trustedTeamIDs: [String] = TrustedPublisher.defaults.map { $0.teamID }
 }
