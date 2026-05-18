@@ -42,7 +42,17 @@ public struct ChainResult {
 
 public enum ProcessTree {
 
+    /// 1Password's Apple Team ID. Pinned in code — never user-configurable
+    /// — so a malicious app cannot expand the set of signing identities
+    /// op-who treats as 1Password. Used both to gate the AX-observer
+    /// attach to the 1Password app process and to verify trigger binaries
+    /// claiming to be the `op` CLI.
     private static let onePasswordTeamID = "2BUA8C4S2C"
+
+    /// `SecRequirement` text matching binaries signed by 1Password's
+    /// Team ID under an Apple-issued Developer ID cert chain.
+    private static let onePasswordRequirementText: String =
+        "anchor apple generic and certificate leaf[subject.OU] = \"\(onePasswordTeamID)\""
 
     private static let terminalBundleIDs: Set<String> = [
         "com.apple.Terminal",
@@ -321,8 +331,11 @@ public enum ProcessTree {
         var buffer = [UInt8](repeating: 0, count: size)
         guard sysctl(&mib, 3, &buffer, &size, nil, 0) == 0 else { return "" }
 
-        // KERN_PROCARGS2 format: argc (int32), then exec path, then NUL-padded args
-        return String(decoding: buffer.prefix(min(size, 4096)), as: UTF8.self)
+        // KERN_PROCARGS2 format: argc (int32), then exec path, then NUL-padded args.
+        // Cap at ARG_MAX (the OS-wide argv+env ceiling) so the conversion never
+        // runs away on a pathological process; sysctl can't return more than
+        // that anyway, so in practice this just uses the full buffer.
+        return String(decoding: buffer.prefix(min(size, Int(ARG_MAX))), as: UTF8.self)
     }
 
     /// Return the full argv of a running process, or [] if unavailable.
@@ -434,7 +447,10 @@ public enum ProcessTree {
         return argv
     }
 
-    /// Check if a running process (by PID) is signed by 1Password's Team ID.
+    /// Check if a running process (by PID) is signed by 1Password's
+    /// Apple Team ID. Used both to gate AX-observer attach to the
+    /// 1Password app process and (via the static-code variant below)
+    /// to classify `op` trigger binaries.
     public static func isRunningProcessSignedByOnePassword(pid: pid_t) -> Bool {
         let attributes = [kSecGuestAttributePid: pid] as CFDictionary
         var code: SecCode?
@@ -442,45 +458,37 @@ public enum ProcessTree {
               let code = code else {
             return false
         }
-
-        let requirementText = """
-            anchor apple generic and certificate leaf[subject.OU] = "\(onePasswordTeamID)"
-            """ as CFString
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(
-            requirementText,
+            onePasswordRequirementText as CFString,
             SecCSFlags(),
             &requirement
         ) == errSecSuccess,
               let requirement = requirement else {
             return false
         }
-
         return SecCodeCheckValidity(code, SecCSFlags(), requirement) == errSecSuccess
     }
 
+    /// Static-code check against 1Password's Team ID — used when
+    /// classifying `op` trigger binaries for the matcher's
+    /// `binaryVerified` predicate.
     private static func isSignedByOnePassword(path: String) -> Bool {
         let url = URL(fileURLWithPath: path).resolvingSymlinksInPath() as CFURL
         var staticCode: SecStaticCode?
-
         guard SecStaticCodeCreateWithPath(url, SecCSFlags(), &staticCode) == errSecSuccess,
               let staticCode = staticCode else {
             return false
         }
-
-        let requirementText = """
-            anchor apple generic and certificate leaf[subject.OU] = "\(onePasswordTeamID)"
-            """ as CFString
         var requirement: SecRequirement?
         guard SecRequirementCreateWithString(
-            requirementText,
+            onePasswordRequirementText as CFString,
             SecCSFlags(),
             &requirement
         ) == errSecSuccess,
               let requirement = requirement else {
             return false
         }
-
         return SecStaticCodeCheckValidity(staticCode, SecCSFlags(), requirement) == errSecSuccess
     }
 

@@ -213,4 +213,78 @@ struct ClaudeContextTests {
         )
         #expect(root == nil)
     }
+
+    @Test func knownMarketplacesLoaderDecodesRealSchema() {
+        // Schema mirrors a real `~/.claude/plugins/known_marketplaces.json`
+        // entry, including an unknown sibling field (`autoUpdate`) and the
+        // optional `lastUpdated` — both must be ignored.
+        let json = #"""
+        {
+          "cloudflare": {
+            "source": { "source": "github", "repo": "cloudflare/skills" },
+            "installLocation": "/Users/x/.claude/plugins/marketplaces/cloudflare",
+            "lastUpdated": "2026-05-08T09:19:52.200Z"
+          },
+          "sunstone-plugins": {
+            "source": { "source": "github", "repo": "sunstoneinstitute/claude-plugins" },
+            "installLocation": "/Users/x/.claude/plugins/marketplaces/sunstone-plugins",
+            "autoUpdate": true
+          }
+        }
+        """#
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("op-who-mkt-\(UUID().uuidString).json")
+        try! json.data(using: .utf8)!.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let dict = loadKnownMarketplaces(at: tmp)
+        #expect(dict?["cloudflare"]?.source.repo == "cloudflare/skills")
+        #expect(dict?["sunstone-plugins"]?.installLocation
+                == "/Users/x/.claude/plugins/marketplaces/sunstone-plugins")
+    }
+
+    @Test func knownMarketplacesLoaderReturnsNilForMissingFile() {
+        let nowhere = URL(fileURLWithPath: "/this/path/does/not/exist.json")
+        #expect(loadKnownMarketplaces(at: nowhere) == nil)
+    }
+
+    @Test func resolveEnrichesWithMarketplaceMetadata() {
+        let base = "/Users/x/.claude/plugins"
+        let cwd = "\(base)/marketplaces/cloudflare/skills/foo"
+        let configPath = "\(base)/marketplaces/cloudflare/.git/config"
+        let gitConfig = "[remote \"origin\"]\n\turl = git@github.com:cloudflare/skills.git\n"
+        let mkt = [
+            "cloudflare": KnownMarketplace(
+                installLocation: "\(base)/marketplaces/cloudflare",
+                source: .init(source: "github", repo: "cloudflare/skills")
+            ),
+        ]
+        let result = resolveClaudePluginUpdate(
+            forCWD: cwd, pluginsBase: base,
+            fileExists: { $0 == configPath },
+            readFile: { $0 == configPath ? gitConfig : nil },
+            knownMarketplaces: mkt
+        )
+        #expect(result?.remoteURL == "git@github.com:cloudflare/skills.git")
+        #expect(result?.repo == "cloudflare/skills")
+        #expect(result?.sourceType == "github")
+        #expect(result?.marketplaceName == "cloudflare")
+    }
+
+    @Test func resolveStillReturnsURLWhenMarketplacesMissing() {
+        // No marketplaces dict → repo/sourceType nil but remoteURL still
+        // populated from .git/config. This is the path that lets the
+        // fallback rule 1b render via {plugin_remote}.
+        let base = "/Users/x/.claude/plugins"
+        let cwd = "\(base)/marketplaces/unknown"
+        let configPath = "\(base)/marketplaces/unknown/.git/config"
+        let result = resolveClaudePluginUpdate(
+            forCWD: cwd, pluginsBase: base,
+            fileExists: { $0 == configPath },
+            readFile: { _ in "[remote \"origin\"]\n\turl = git@gitlab.com:acme/widgets.git\n" },
+            knownMarketplaces: nil
+        )
+        #expect(result?.remoteURL == "git@gitlab.com:acme/widgets.git")
+        #expect(result?.repo == nil)
+        #expect(result?.sourceType == nil)
+    }
 }

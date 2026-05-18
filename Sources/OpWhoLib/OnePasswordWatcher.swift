@@ -12,13 +12,15 @@ public class OnePasswordWatcher {
     private var trackedDialogElement: AXUIElement?
     private var dialogPollTimer: Timer?
     private var trackedProcessPIDs: Set<pid_t> = []
+    private let recentStore: RecentRequestsStore?
 
     private static let bundleIDs = [
         "com.1password.1password",
         "com.agilebits.onepassword7",
     ]
 
-    public init() {
+    public init(recentStore: RecentRequestsStore? = nil) {
+        self.recentStore = recentStore
         let nc = NSWorkspace.shared.notificationCenter
 
         let launchObs = nc.addObserver(
@@ -238,13 +240,17 @@ public class OnePasswordWatcher {
             let cwd = measure("bestCWD") { ProcessTree.bestCWD(chain: foldedChain) }
                 .map(ProcessTree.tidyPath)
 
+            // The trigger's own (untidied) CWD is needed by both plugin-update
+            // detection (must live under ~/.claude/plugins/) AND the matcher
+            // engine's `triggerCwdPrefix` predicate. Look it up once.
+            let triggerCWD = measure("processCWD[\(triggerPID)]") { ProcessTree.processCWD(pid: triggerPID) }
+
             // Detect Claude Code background plugin/marketplace updates: a `git`
             // trigger whose own CWD lives under ~/.claude/plugins/. We use the
             // trigger's literal CWD (not bestCWD) because the surrounding chain
             // may have a wider CWD that escapes the plugins tree.
             let pluginUpdate: ClaudePluginUpdate? = {
                 guard triggerNode.name == "git" else { return nil }
-                let triggerCWD = ProcessTree.processCWD(pid: triggerPID)
                 return measure("claudePluginUpdate") {
                     claudePluginUpdate(forCWD: triggerCWD)
                 }
@@ -275,6 +281,32 @@ public class OnePasswordWatcher {
 
             let entryStartTime = measure("processStartTime") { ProcessTree.processStartTime(pid: triggerPID) }
 
+            // Run the matcher engine once here so the same evaluation drives
+            // candidate ranking, overlay rendering, ring-buffer recording,
+            // and the debug log dump. The matched rule's id/name and the
+            // rendered text are stored on the entry; downstream consumers
+            // read those fields rather than re-evaluating the rules.
+            let matchContext = MatchContext(
+                chain: foldedChain,
+                triggerArgv: triggerArgv,
+                cwd: cwd,
+                triggerCwd: triggerCWD,
+                claudeSession: claudeSession,
+                pluginUpdate: pluginUpdate,
+                terminalBundleID: result.terminalBundleID
+            )
+            let summary = makeRequestSummary(
+                chain: foldedChain,
+                triggerArgv: triggerArgv,
+                tabTitle: tabTitle,
+                claudeSession: claudeSession,
+                terminalBundleID: result.terminalBundleID,
+                cwd: cwd,
+                triggerCwd: triggerCWD,
+                pluginUpdate: pluginUpdate
+            )
+            let matchResult = RequestRuleEngine.evaluate(rules: OpWhoConfig.rules, context: matchContext)
+
             let entry = OverlayPanel.ProcessEntry(
                 pid: triggerPID,
                 chain: foldedChain,
@@ -287,26 +319,21 @@ public class OnePasswordWatcher {
                 terminalBundleID: result.terminalBundleID,
                 terminalPID: result.terminalPID,
                 cwd: cwd,
+                triggerCwd: triggerCWD,
                 cmuxWorkspaceID: cmuxWorkspaceID,
                 cmuxTabID: cmuxTabID,
                 cmuxSurface: cmuxSurface,
                 startTime: entryStartTime,
-                pluginUpdate: pluginUpdate
+                pluginUpdate: pluginUpdate,
+                summary: summary,
+                matchedRuleID: matchResult?.rule.id,
+                matchedRuleName: matchResult?.rule.name,
+                matchedBuiltInID: matchResult?.rule.builtInID
             )
-
-            let kind = makeRequestSummary(
-                chain: foldedChain,
-                triggerArgv: triggerArgv,
-                tabTitle: tabTitle,
-                claudeSession: claudeSession,
-                terminalBundleID: result.terminalBundleID,
-                cwd: cwd,
-                pluginUpdate: pluginUpdate
-            ).kind
 
             candidates.append(TriggerCandidate(
                 entry: entry,
-                kind: kind,
+                kind: summary.kind,
                 startTime: ProcessTree.processStartTime(pid: triggerPID)
             ))
         }
@@ -346,6 +373,28 @@ public class OnePasswordWatcher {
         startDialogPolling()
 
         Log.watcher.debug("dialog-shown entries=\(jsonDump(entries: displayedEntries), privacy: .public) candidates=\(candidates.count, privacy: .public)")
+
+        if let store = recentStore {
+            let recent = RecentRequest(
+                chainNames: chosen.entry.chain.map { $0.name },
+                triggerArgv: chosen.entry.triggerArgv,
+                cwd: chosen.entry.cwd,
+                triggerCwd: chosen.entry.triggerCwd,
+                binaryVerified: chosen.entry.chain.first?.isVerifiedOnePasswordCLI ?? false,
+                claudeSession: chosen.entry.claudeSession,
+                terminalBundleID: chosen.entry.terminalBundleID,
+                tabTitle: chosen.entry.tabTitle,
+                pluginRemoteURL: chosen.entry.pluginUpdate?.remoteURL,
+                title: chosen.entry.summary.title,
+                subtitle: chosen.entry.summary.subtitle,
+                kindRaw: chosen.entry.summary.kind.rawValue,
+                isWarning: chosen.entry.summary.isWarning,
+                matchedRuleID: chosen.entry.matchedRuleID,
+                matchedRuleName: chosen.entry.matchedRuleName,
+                matchedBuiltInID: chosen.entry.matchedBuiltInID
+            )
+            store.record(recent)
+        }
 
         DispatchQueue.main.async { [weak self] in
             self?.showOverlay(entries: displayedEntries, near: windowFrame)
@@ -507,21 +556,14 @@ func jsonDump(entries: [OverlayPanel.ProcessEntry]) -> String {
             ]
         }
 
-        let summary = makeRequestSummary(
-            chain: entry.chain,
-            triggerArgv: entry.triggerArgv,
-            tabTitle: entry.tabTitle,
-            claudeSession: entry.claudeSession,
-            terminalBundleID: entry.terminalBundleID,
-            cwd: entry.cwd,
-            pluginUpdate: entry.pluginUpdate
-        )
+        let summary = entry.summary
         var s: [String: Any] = [
             "kind": summary.kind.rawValue,
             "title": summary.title,
             "isWarning": summary.isWarning,
         ]
         if let sub = summary.subtitle { s["subtitle"] = sub }
+        if let rule = entry.matchedRuleName { s["matchedRule"] = rule }
         dict["summary"] = s
         return dict
     }

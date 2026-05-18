@@ -197,22 +197,104 @@ public struct ClaudePluginUpdate: Equatable {
     /// Remote URL from the plugin repo's `.git/config`
     /// (e.g. `git@github.com:cloudflare/skills.git`).
     public let remoteURL: String
+    /// `source.repo` from `known_marketplaces.json` when the install
+    /// directory matched a known marketplace entry (e.g. `cloudflare/skills`).
+    /// Nil when the lookup failed or the file is absent.
+    public let repo: String?
+    /// `source.source` from `known_marketplaces.json` — currently always
+    /// `"github"` in observed Claude installs, but treated as opaque.
+    public let sourceType: String?
+    /// Top-level key from `known_marketplaces.json` (e.g. `cloudflare`,
+    /// `sunstone-plugins`). Surfaced as context but not currently shown
+    /// in any default rule.
+    public let marketplaceName: String?
 
-    public init(remoteURL: String) {
+    public init(
+        remoteURL: String,
+        repo: String? = nil,
+        sourceType: String? = nil,
+        marketplaceName: String? = nil
+    ) {
         self.remoteURL = remoteURL
+        self.repo = repo
+        self.sourceType = sourceType
+        self.marketplaceName = marketplaceName
+    }
+}
+
+/// One entry from `~/.claude/plugins/known_marketplaces.json`. Decoded
+/// leniently — unknown fields (e.g. `lastUpdated`, `autoUpdate`) are
+/// ignored and a malformed entry just falls out of the lookup.
+public struct KnownMarketplace: Codable, Equatable {
+    public let installLocation: String
+    public let source: SourceInfo
+
+    public struct SourceInfo: Codable, Equatable {
+        public let source: String
+        public let repo: String?
+
+        public init(source: String, repo: String?) {
+            self.source = source
+            self.repo = repo
+        }
+    }
+
+    public init(installLocation: String, source: SourceInfo) {
+        self.installLocation = installLocation
+        self.source = source
     }
 }
 
 /// Look up plugin-update info for a CWD. Returns nil unless the CWD lives
 /// inside `~/.claude/plugins/` AND we can locate and parse a `.git/config`
-/// at some directory between the CWD and the plugins root.
+/// at some directory between the CWD and the plugins root. When the resolved
+/// repo root matches an `installLocation` in `known_marketplaces.json`, the
+/// returned struct also carries the structured `repo` / `sourceType` fields.
 public func claudePluginUpdate(forCWD cwd: String?) -> ClaudePluginUpdate? {
-    guard let cwd = cwd,
-          let repoRoot = claudePluginRepoRoot(forCWD: cwd) else { return nil }
+    guard let cwd = cwd else { return nil }
+    let pluginsBase = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/plugins").path
+    let marketplacesURL = URL(fileURLWithPath: pluginsBase)
+        .appendingPathComponent("known_marketplaces.json")
+    return resolveClaudePluginUpdate(
+        forCWD: cwd,
+        pluginsBase: pluginsBase,
+        fileExists: { FileManager.default.fileExists(atPath: $0) },
+        readFile: { try? String(contentsOfFile: $0, encoding: .utf8) },
+        knownMarketplaces: loadKnownMarketplaces(at: marketplacesURL)
+    )
+}
+
+/// Pure resolver — every disk dependency injected. The real entry point
+/// `claudePluginUpdate(forCWD:)` is a thin wrapper that fills these in
+/// from the live filesystem.
+public func resolveClaudePluginUpdate(
+    forCWD cwd: String,
+    pluginsBase: String,
+    fileExists: (String) -> Bool,
+    readFile: (String) -> String?,
+    knownMarketplaces: [String: KnownMarketplace]?
+) -> ClaudePluginUpdate? {
+    guard let repoRoot = pluginRepoRoot(
+        cwd: cwd, pluginsBase: pluginsBase, fileExists: fileExists
+    ) else { return nil }
     let configPath = (repoRoot as NSString).appendingPathComponent(".git/config")
-    guard let content = try? String(contentsOfFile: configPath, encoding: .utf8),
+    guard let content = readFile(configPath),
           let url = parseGitOriginURL(gitConfig: content) else { return nil }
-    return ClaudePluginUpdate(remoteURL: url)
+    let entry = knownMarketplaces?.first { $0.value.installLocation == repoRoot }
+    return ClaudePluginUpdate(
+        remoteURL: url,
+        repo: entry?.value.source.repo,
+        sourceType: entry?.value.source.source,
+        marketplaceName: entry?.key
+    )
+}
+
+/// Decode `known_marketplaces.json`. Returns nil when the file is missing
+/// or malformed — callers fall back to just the `.git/config` URL.
+public func loadKnownMarketplaces(at url: URL) -> [String: KnownMarketplace]? {
+    guard let data = try? Data(contentsOf: url) else { return nil }
+    return try? JSONDecoder().decode([String: KnownMarketplace].self, from: data)
 }
 
 /// Walk up from `cwd` toward `~/.claude/plugins/` looking for the first

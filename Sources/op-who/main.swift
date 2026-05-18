@@ -1,13 +1,25 @@
 import AppKit
 import OpWhoLib
-import ServiceManagement
 import os
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var watcher: OnePasswordWatcher!
-    var startupMenuItem: NSMenuItem!
     var trustPollTimer: Timer?
+
+    // Stores own on-disk state. The recent-requests store is passed to
+    // the watcher so each detection drops an entry into the ring buffer.
+    let ruleStore = RequestRuleStore()
+    let recentStore = RecentRequestsStore()
+    var configController: ConfigWindowController?
+
+    override init() {
+        super.init()
+        // Wire stores to the globals BEFORE any detection happens, then
+        // seed the globals with the loaded values.
+        ruleStore.onRulesChanged = { OpWhoConfig.rules = $0 }
+        OpWhoConfig.rules = ruleStore.allRules
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
@@ -21,40 +33,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let menu = NSMenu()
-        menu.delegate = self
-        menu.addItem(NSMenuItem(
+        // No item in this menu uses a state image, so suppress the column
+        // macOS would otherwise reserve on the left.
+        menu.showsStateColumn = false
+        let trustItem = NSMenuItem(
             title: trusted ? "Accessibility: Granted" : "Accessibility: Not Granted",
             action: nil,
             keyEquivalent: ""
-        ))
+        )
+        menu.addItem(trustItem)
         menu.addItem(.separator())
-        startupMenuItem = NSMenuItem(
-            title: "Run on startup",
-            action: #selector(toggleRunOnStartup(_:)),
-            keyEquivalent: ""
+        let configItem = NSMenuItem(
+            title: "Settings…",
+            action: #selector(openConfigure(_:)),
+            keyEquivalent: ","
         )
-        startupMenuItem.target = self
-        // Explicit checkbox glyphs in both states so the off state isn't a
-        // blank gap that leaves the user guessing.
-        startupMenuItem.onStateImage = NSImage(
-            systemSymbolName: "checkmark.square.fill",
-            accessibilityDescription: "Enabled"
-        )
-        startupMenuItem.offStateImage = NSImage(
-            systemSymbolName: "square",
-            accessibilityDescription: "Disabled"
-        )
-        updateStartupMenuItemState()
-        menu.addItem(startupMenuItem)
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(
+        configItem.target = self
+        menu.addItem(configItem)
+        let quitItem = NSMenuItem(
             title: "Quit op-who",
-            action: #selector(NSApplication.terminate(_:)),
+            // Route through our own selector instead of NSApplication.terminate(_:)
+            // — macOS auto-decorates menu items bound directly to terminate:
+            // with an `xmark.square` glyph that ignores `showsStateColumn`.
+            action: #selector(quitAction(_:)),
             keyEquivalent: "q"
-        ))
+        )
+        quitItem.target = self
+        menu.addItem(quitItem)
         statusItem.menu = menu
 
-        watcher = OnePasswordWatcher()
+        watcher = OnePasswordWatcher(recentStore: recentStore)
 
         if !trusted {
             startTrustPolling()
@@ -106,14 +114,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
-        updateStartupMenuItemState()
-    }
-
-    private func updateStartupMenuItemState() {
-        startupMenuItem.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
-    }
-
     /// Draw the menu-bar template icon: a filled disk with the inner ring
     /// and the "?" glyph punched out as transparent cutouts. Mirrors the
     /// 1Password app icon's silhouette (so the visual relationship reads at
@@ -163,24 +163,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return image
     }
 
-    @objc func toggleRunOnStartup(_ sender: NSMenuItem) {
-        let service = SMAppService.mainApp
-        do {
-            if service.status == .enabled {
-                try service.unregister()
-            } else {
-                try service.register()
-            }
-        } catch {
-            let alert = NSAlert()
-            alert.messageText = "Could not change startup setting"
-            alert.informativeText = error.localizedDescription
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-        }
-        updateStartupMenuItemState()
+    @objc func quitAction(_ sender: Any?) {
+        NSApp.terminate(sender)
     }
+
+    @objc func openConfigure(_ sender: Any?) {
+        if configController == nil {
+            configController = ConfigWindowController(
+                ruleStore: ruleStore,
+                recentStore: recentStore
+            )
+        }
+        // LSUIElement apps don't get activated by clicking a menu item;
+        // poke the activation policy briefly so the config window comes
+        // to the front and accepts keyboard focus.
+        NSApp.activate(ignoringOtherApps: true)
+        configController?.showWindow(nil)
+        configController?.window?.makeKeyAndOrderFront(nil)
+    }
+
 }
 
 let app = NSApplication.shared
